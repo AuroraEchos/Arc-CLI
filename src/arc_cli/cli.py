@@ -7,14 +7,16 @@ import asyncio
 import json
 import os
 import sys
-from contextlib import aclosing
+from collections.abc import Iterator
+from contextlib import aclosing, contextmanager
 from pathlib import Path
+from typing import TextIO, cast
 
 from dotenv import load_dotenv
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory, History, InMemoryHistory
-from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.patch_stdout import StdoutProxy
 from prompt_toolkit.styles import Style
 
 from arc_cli import __version__
@@ -65,6 +67,22 @@ HELP = """普通输入开始任务；任务运行时的普通输入会在下一�
 """
 
 
+@contextmanager
+def patch_terminal_stdout() -> Iterator[None]:
+    """通过无额外延迟的 prompt_toolkit 代理安全写入完整终端行。"""
+
+    with StdoutProxy(sleep_between_writes=0, raw=True) as proxy:
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        sys.stdout = cast(TextIO, proxy)
+        sys.stderr = cast(TextIO, proxy)
+        try:
+            yield
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+
+
 def parser() -> argparse.ArgumentParser:
     """创建并返回 Arc CLI 参数解析器。"""
 
@@ -110,11 +128,13 @@ async def interactive(session: ArcSession, initial: str, renderer: Renderer) -> 
     """运行支持命令、steering 和 follow-up 的交互式终端会话。"""
 
     history: History = InMemoryHistory()
+    task: asyncio.Task[int] | None = None
     if session.store.path is not None:
         history_path = session.agent.cwd / ".arc" / "input-history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
         history = FileHistory(str(history_path))
     prompt_session: PromptSession[str] = PromptSession(
+        message=renderer.input_prompt,
         history=history,
         completer=WordCompleter(COMMANDS, WORD=True),
         complete_while_typing=False,
@@ -129,7 +149,14 @@ async def interactive(session: ArcSession, initial: str, renderer: Renderer) -> 
         ),
     )
     renderer.bind_prompt(prompt_session.app.invalidate)
-    task: asyncio.Task[int] | None = None
+
+    def start_task(text: str) -> None:
+        """启动后台任务，并在完成时刷新动态输入提示。"""
+
+        nonlocal task
+        renderer.state = "running"
+        task = asyncio.create_task(consume(session, text, renderer))
+        task.add_done_callback(lambda _: prompt_session.app.invalidate())
 
     async def abort() -> None:
         nonlocal task
@@ -141,16 +168,20 @@ async def interactive(session: ArcSession, initial: str, renderer: Renderer) -> 
                 if isinstance(result, Exception):
                     print(safe_terminal(f"[error] {result}"), file=sys.stderr)
             task = None
+            renderer.state = "idle"
+            prompt_session.app.invalidate()
 
     renderer.show_banner(session)
-    with patch_stdout(raw=True):
+    # Renderer 已按完整行合并流式文本，无需输出代理再延迟 200 ms 批处理。
+    # 立即提交可以保证最终文本先落到终端，随后才恢复下一条输入提示。
+    with patch_terminal_stdout():
         renderer.bind_streams(sys.stdout, sys.stdout)
         try:
             if initial:
-                task = asyncio.create_task(consume(session, initial, renderer))
+                start_task(initial)
             while True:
                 try:
-                    text = (await prompt_session.prompt_async("arc ▸ ")).strip()
+                    text = (await prompt_session.prompt_async()).strip()
                 except KeyboardInterrupt:
                     await abort()
                     print(renderer.paint("aborted", YELLOW))
@@ -194,7 +225,7 @@ async def interactive(session: ArcSession, initial: str, renderer: Renderer) -> 
                         if not argument.strip():
                             raise ValueError("Provide text after the command")
                         if not busy:
-                            task = asyncio.create_task(consume(session, argument, renderer))
+                            start_task(argument)
                         elif command == "/steer":
                             session.agent.steer(argument)
                         else:
@@ -225,7 +256,7 @@ async def interactive(session: ArcSession, initial: str, renderer: Renderer) -> 
                         session.agent.steer(text)
                         print(renderer.paint("queued │ next model turn", DIM))
                     else:
-                        task = asyncio.create_task(consume(session, text, renderer))
+                        start_task(text)
                 except (ValueError, OSError, RuntimeError) as exc:
                     print(renderer.paint(f"error │ {safe_terminal(str(exc))}", RED), file=sys.stderr)
         finally:

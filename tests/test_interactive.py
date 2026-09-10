@@ -43,8 +43,8 @@ class InteractiveTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch("arc_cli.cli.PromptSession", return_value=terminal),
                     patch(
-                        "arc_cli.cli.patch_stdout",
-                        side_effect=lambda **_: contextlib.nullcontext(),
+                        "arc_cli.cli.patch_terminal_stdout",
+                        side_effect=contextlib.nullcontext,
                     ),
                     contextlib.redirect_stdout(output),
                     contextlib.redirect_stderr(output),

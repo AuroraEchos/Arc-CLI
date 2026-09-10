@@ -64,6 +64,14 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
         self.assertEqual(output.getvalue(), "arc │ first\n    │ second\n")
 
+    def test_input_prompt_is_hidden_until_agent_end(self) -> None:
+        renderer = Renderer("text", stdout=io.StringIO(), stderr=io.StringIO())
+        self.assertEqual(renderer.input_prompt(), "arc ▸ ")
+        renderer.emit(Event("agent_start"))
+        self.assertEqual(renderer.input_prompt(), "")
+        renderer.emit(Event("agent_end", {"status": "complete"}))
+        self.assertEqual(renderer.input_prompt(), "arc ▸ ")
+
     def test_fragmented_multiline_message_is_written_as_complete_lines(self) -> None:
         output = io.StringIO()
         renderer = Renderer("text", stdout=output, stderr=output)
@@ -193,6 +201,9 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
             renderer.emit(Event("turn_start", {"turn": 1}))
             await asyncio.sleep(0.18)
             renderer.emit(Event("message_update", {"delta": "ready"}))
+            self.assertIn("thinking", renderer.bottom_toolbar())
+            renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
+            self.assertEqual(renderer.bottom_toolbar(), "")
             await asyncio.sleep(0)
 
         dynamic = errors.getvalue()

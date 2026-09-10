@@ -126,6 +126,11 @@ class Renderer:
         frame = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
         return f"{frame} {self._spinner_label}"
 
+    def input_prompt(self) -> str:
+        """仅在当前任务真正结束后显示下一条输入提示。"""
+
+        return "arc ▸ " if self.state == "idle" else ""
+
     def paint(self, text: str, style: str) -> str:
         """在启用颜色时为文本应用单个 ANSI 样式。"""
 
@@ -202,12 +207,11 @@ class Renderer:
             self.assistant_started = False
             self._message_buffer = ""
         elif event.type == "message_update":
-            self.stop_activity()
             self._message_buffer += safe_terminal(str(event.data["delta"]))
             self._flush_complete_message_lines()
         elif event.type == "message_end" and event.data["message"]["role"] == "assistant":
-            self.stop_activity()
             self._flush_message_tail()
+            self.stop_activity()
         elif event.type == "tool_execution_start":
             self.stop_activity()
             call = event.data["tool_call"]

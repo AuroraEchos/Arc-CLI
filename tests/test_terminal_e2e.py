@@ -264,6 +264,12 @@ class TerminalE2ETests(unittest.TestCase):
             self.assertIn(expected, output)
         self.assertIn("state", output)
         self.assertIn("idle", output)
+        question_end = output.find("介绍一下上海大学") + len("介绍一下上海大学")
+        answer_end = output.find("**优势学科**：工程、材料与艺术。")
+        self.assertGreater(question_end, len("介绍一下上海大学"))
+        self.assertGreater(answer_end, question_end)
+        self.assertNotIn("arc ▸", output[question_end:answer_end])
+        self.assertIn("arc ▸", output[answer_end:])
         self.assertEqual(len(server.requests), 1)
 
     def test_real_pty_tool_summary_and_last_tool(self) -> None:
