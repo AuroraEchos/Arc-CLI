@@ -1,0 +1,271 @@
+"""通过真实 PTY 和本地 SSE 服务测试 Arc CLI 终端交互。"""
+
+import errno
+import fcntl
+import json
+import os
+import pty
+import select
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+
+def text_response(text: str) -> list[bytes]:
+    """创建一次成功的流式文本响应。"""
+
+    return [
+        _data({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}),
+        _data({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        b"data: [DONE]\n\n",
+    ]
+
+
+def tool_response(name: str, arguments: dict[str, object]) -> list[bytes]:
+    """创建一次包含完整 function call 的流式响应。"""
+
+    call = {
+        "index": 0,
+        "id": "pty-call",
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
+    return [
+        _data({"choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None}]}),
+        _data({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        b"data: [DONE]\n\n",
+    ]
+
+
+def _data(payload: dict[str, object]) -> bytes:
+    return f"data: {json.dumps(payload)}\n\n".encode()
+
+
+class MockModelServer(ThreadingHTTPServer):
+    """按顺序返回预设 SSE 响应的本地模型服务。"""
+
+    def __init__(self, responses: list[list[bytes]]):
+        super().__init__(("127.0.0.1", 0), MockModelHandler)
+        self.responses = responses
+        self.requests: list[dict[str, object]] = []
+        self.lock = threading.Lock()
+
+
+class MockModelHandler(BaseHTTPRequestHandler):
+    """处理测试中的 Chat Completions 请求。"""
+
+    server: MockModelServer
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length))
+        with self.server.lock:
+            self.server.requests.append(payload)
+            response = self.server.responses.pop(0)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        # 保留短暂静默期，让真实终端有机会展示并刷新 thinking spinner。
+        time.sleep(0.2)
+        try:
+            for packet in response:
+                self.wfile.write(packet)
+                self.wfile.flush()
+                time.sleep(0.02)
+        except BrokenPipeError:
+            pass
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+class PtyProcess:
+    """管理一个连接到真实伪终端的 Arc CLI 子进程。"""
+
+    def __init__(self, cwd: Path, port: int):
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
+        env = os.environ.copy()
+        env.update(
+            {
+                "API_KEY": "test-key",
+                "BASE_URL": f"http://127.0.0.1:{port}/v1",
+                "MODEL": "arc-pty-model",
+                "NO_PROXY": "127.0.0.1,localhost",
+                "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+                "TERM": "xterm-256color",
+            }
+        )
+        env.pop("NO_COLOR", None)
+        self.master = master
+        self.process = subprocess.Popen(
+            [sys.executable, "-m", "arc_cli", "--cwd", str(cwd), "--no-session"],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env=env,
+            close_fds=True,
+            start_new_session=True,
+        )
+        os.close(slave)
+        self.output = bytearray()
+
+    def send(self, text: str) -> None:
+        os.write(self.master, text.encode())
+
+    def wait_for(self, text: str, timeout: float = 6) -> str:
+        """读取 PTY，直到出现目标文本或超时。"""
+
+        target = text.encode()
+        deadline = time.monotonic() + timeout
+        while target not in self.output and time.monotonic() < deadline:
+            readable, _, _ = select.select([self.master], [], [], 0.1)
+            if not readable:
+                continue
+            try:
+                chunk = os.read(self.master, 8192)
+            except OSError as exc:
+                if exc.errno == errno.EIO:
+                    break
+                raise
+            if not chunk:
+                break
+            self.output.extend(chunk)
+            # prompt_toolkit 通过 CPR 查询光标位置；模拟终端回应最后一行的位置。
+            if b"\x1b[6n" in chunk:
+                os.write(self.master, b"\x1b[32;1R")
+        decoded = self.output.decode(errors="replace")
+        if target not in self.output:
+            raise AssertionError(f"Timed out waiting for {text!r}. Output:\n{decoded}")
+        return decoded
+
+    def close(self) -> None:
+        """退出 Arc CLI，并确保测试子进程不会泄漏。"""
+
+        if self.process.poll() is None:
+            self.send("/quit\n")
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.process.pid, signal.SIGKILL)
+                self.process.wait(timeout=3)
+        os.close(self.master)
+
+
+class TerminalE2ETests(unittest.TestCase):
+    def run_scenario(self, responses: list[list[bytes]], action) -> tuple[str, MockModelServer]:
+        """在本地模型服务和真实 PTY 中运行一个交互场景。"""
+
+        server = MockModelServer(responses)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        with tempfile.TemporaryDirectory() as directory:
+            terminal = PtyProcess(Path(directory), server.server_port)
+            try:
+                terminal.wait_for("arc ▸")
+                action(terminal)
+                terminal.close()
+                output = terminal.output.decode(errors="replace")
+            finally:
+                if terminal.process.poll() is None:
+                    terminal.close()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+        return output, server
+
+    def test_real_pty_banner_spinner_answer_and_status(self) -> None:
+        def action(terminal: PtyProcess) -> None:
+            terminal.send("hello\n")
+            terminal.wait_for("PTY ready")
+            time.sleep(0.1)
+            terminal.send("/status\n")
+            terminal.wait_for("idle")
+
+        output, server = self.run_scenario([text_response("PTY ready")], action)
+        self.assertIn("Arc CLI", output)
+        self.assertIn("terminal-native agent runtime", output)
+        self.assertIn("arc-pty-model", output)
+        self.assertIn("thinking", output)
+        self.assertIn("arc", output)
+        self.assertIn("PTY ready", output)
+        self.assertIn("state", output)
+        self.assertEqual(len(server.requests), 1)
+
+    def test_real_pty_tool_summary_and_last_tool(self) -> None:
+        responses = [
+            tool_response("bash", {"command": "sleep 0.25; printf 'pty-tool-ok\\n'"}),
+            text_response("tool complete"),
+        ]
+
+        def action(terminal: PtyProcess) -> None:
+            terminal.send("run a command\n")
+            terminal.wait_for("tool complete")
+            time.sleep(0.1)
+            terminal.send("/last-tool\n")
+            terminal.wait_for("────────────────────────────────────────────")
+
+        output, server = self.run_scenario(responses, action)
+        # prompt_toolkit 使用增量光标更新，状态文本在原始 PTY 字节中可能被控制序列分段。
+        self.assertIn("ing bash", output)
+        self.assertIn("╭─ bash", output)
+        self.assertIn("Exit code: 0", output)
+        self.assertIn("╰─ done", output)
+        self.assertIn("tool complete", output)
+        self.assertIn("/last-tool", output)
+        self.assertEqual(len(server.requests), 2)
+
+    def test_real_pty_failed_tool_history_and_tree(self) -> None:
+        responses = [
+            tool_response("bash", {"command": "printf 'expected-failure\\n'; exit 7"}),
+            text_response("failure inspected"),
+        ]
+
+        def action(terminal: PtyProcess) -> None:
+            terminal.send("run the failing command\n")
+            terminal.wait_for("failure inspected")
+            time.sleep(0.1)
+            terminal.send("/history\n")
+            terminal.wait_for("tool:bash error")
+            terminal.send("/tree\n")
+            terminal.wait_for("current")
+
+        output, server = self.run_scenario(responses, action)
+        self.assertIn("Exit code: 7", output)
+        self.assertIn("╰─ error", output)
+        self.assertIn("tool:bash error", output)
+        self.assertIn("●", output)
+        self.assertIn("current", output)
+        self.assertEqual(len(server.requests), 2)
+
+    def test_real_pty_ctrl_c_cancels_running_tool_and_returns_to_prompt(self) -> None:
+        responses = [tool_response("bash", {"command": "sleep 5; printf 'slow-finished\\n'"})]
+
+        def action(terminal: PtyProcess) -> None:
+            terminal.send("start a slow command\n")
+            terminal.wait_for("ing bash")
+            terminal.send("\x03")
+            terminal.wait_for("aborted")
+            terminal.send("/status\n")
+            terminal.wait_for("idle")
+
+        output, server = self.run_scenario(responses, action)
+        self.assertIn("aborted", output)
+        self.assertIn("state", output)
+        self.assertIn("idle", output)
+        self.assertNotIn("slow-finished", output)
+        self.assertEqual(len(server.requests), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

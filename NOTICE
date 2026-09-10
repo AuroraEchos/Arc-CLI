@@ -1,0 +1,7 @@
+Arc CLI is an independent Python implementation inspired by Pi.
+It is not affiliated with or an official port of Pi.
+
+Upstream reference: https://github.com/earendil-works/pi
+Reference commit: 6160683a4a8012f0d1cd30c145df18b4ca6f5176
+Upstream copyright: Copyright (c) 2025 Mario Zechner
+Upstream license: MIT (notice retained in LICENSE).

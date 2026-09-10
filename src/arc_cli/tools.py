@@ -1,0 +1,284 @@
+"""定义工具注册表、参数校验和 Arc CLI 的内置工具。"""
+
+from __future__ import annotations
+
+import asyncio
+import codecs
+import os
+import signal
+import tempfile
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+from jsonschema import Draft202012Validator, ValidationError
+
+from arc_cli.types import JsonObject, ToolCall, ToolSpec
+
+MAX_FILE_BYTES = 1024 * 1024
+MAX_OUTPUT = 24_000
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """保存工具输出及其错误状态。"""
+
+    content: str
+    is_error: bool = False
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    """提供工具工作目录和流式进度回调。"""
+
+    cwd: Path
+    emit: Callable[[str], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class Tool:
+    """将工具规范与异步执行函数绑定。"""
+
+    spec: ToolSpec
+    execute: Callable[[JsonObject, ToolContext], Awaitable[ToolResult]]
+
+
+class ToolRegistry:
+    """注册工具，并在执行前校验模型提供的参数。"""
+
+    def __init__(self, tools: Sequence[Tool] = ()):
+        self._tools: dict[str, Tool] = {}
+        for tool in tools:
+            self.register(tool)
+
+    def register(self, tool: Tool) -> None:
+        """注册工具，并验证其名称唯一且参数 Schema 有效。"""
+        if tool.spec.name in self._tools:
+            raise ValueError(f"Duplicate tool: {tool.spec.name}")
+        Draft202012Validator.check_schema(tool.spec.parameters)
+        self._tools[tool.spec.name] = tool
+
+    def specs(self) -> list[ToolSpec]:
+        """返回所有已注册工具的规范。"""
+        return [tool.spec for tool in self._tools.values()]
+
+    def names(self) -> list[str]:
+        """按注册顺序返回工具名称。"""
+        return list(self._tools)
+
+    def validate(self, call: ToolCall) -> Tool:
+        """验证工具调用名称和参数，并返回匹配的工具。"""
+        tool = self._tools.get(call.name)
+        if tool is None:
+            raise ValueError(f"Unknown tool: {call.name}")
+        try:
+            Draft202012Validator(tool.spec.parameters).validate(call.arguments)
+        except ValidationError as e:
+            raise ValueError(f"Invalid arguments for tool {call.name}: {e.message}") from e
+        return tool
+
+    async def execute(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        """执行已注册工具，并将普通异常转换为错误结果。"""
+        try:
+            tool = self.validate(call)
+            return await tool.execute(call.arguments, context)
+        except ValueError as exc:
+            return ToolResult(f"Invalid arguments: {exc}", True)
+        except Exception as exc:
+            # CancelledError 是 BaseException，必须交还 Arc 负责取消和清理。
+            return ToolResult(f"{type(exc).__name__}: {exc}", True)
+
+
+def _path(context: ToolContext, value: str) -> Path:
+    """相对于工具工作目录解析路径；绝对路径保持其原始语义。"""
+    path = Path(value).expanduser()
+    return (path if path.is_absolute() else context.cwd / path).resolve()
+
+
+def _read_text(path: Path) -> str:
+    """读取受大小限制的 UTF-8 文本，并拒绝明显的二进制文件。"""
+    with path.open("rb") as handle:
+        data = handle.read(MAX_FILE_BYTES + 1)
+    if len(data) > MAX_FILE_BYTES:
+        raise ValueError("File exceeds 1 MiB; use bash to inspect a smaller portion")
+    if b"\x00" in data:
+        raise ValueError("Binary files are not supported")
+    return data.decode("utf-8")
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """通过同目录临时文件和原子替换写入 UTF-8 文本。"""
+    if len(content.encode("utf-8")) > MAX_FILE_BYTES:
+        raise ValueError("Write exceeds 1 MiB")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    permissions = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    descriptor, temporary = tempfile.mkstemp(prefix=".arc-", dir=path.parent)
+
+    written = False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.fchmod(handle.fileno(), permissions)
+        os.replace(temporary, path)
+        written = True
+    finally:
+        if not written:
+            Path(temporary).unlink(missing_ok=True)
+
+
+async def read(arguments: JsonObject, context: ToolContext) -> ToolResult:
+    """读取 UTF-8 文件，并返回指定范围内带行号的文本。"""
+    lines = _read_text(_path(context, arguments["path"])).splitlines()
+    offset = arguments.get("offset", 1)
+    limit = arguments.get("limit", 200)
+    selected = lines[offset - 1 : offset - 1 + limit]
+    result = "\n".join(f"{i}: {line}" for i, line in enumerate(selected, offset))
+    if offset - 1 + len(selected) < len(lines):
+        result += f"\n[More lines: use offset={offset + len(selected)}]"
+    if len(result) > MAX_OUTPUT:
+        result = result[:MAX_OUTPUT] + "\n[Output truncated at 24000 characters]"
+    return ToolResult(result or "[Empty file or offset beyond end]")
+
+
+async def write(arguments: JsonObject, context: ToolContext) -> ToolResult:
+    """创建或原子覆盖 UTF-8 文件。"""
+    path = _path(context, arguments["path"])
+    _atomic_write(path, arguments["content"])
+    return ToolResult(f"Wrote {path}")
+
+
+async def edit(arguments: JsonObject, context: ToolContext) -> ToolResult:
+    """对文件执行可检测缺失和歧义的精确文本替换。"""
+    path = _path(context, arguments["path"])
+    original = _read_text(path)
+    old = arguments["old_text"]
+    count = original.count(old)
+    if count == 0:
+        raise ValueError("old_text not found; read the file again")
+    if count > 1 and not arguments.get("replace_all", False):
+        raise ValueError(f"old_text matches {count} times; supply more context or replace_all=true")
+    updated = original.replace(old, arguments["new_text"], -1 if arguments.get("replace_all") else 1)
+    _atomic_write(path, updated)
+    return ToolResult(f"Edited {path}")
+
+
+async def bash(arguments: JsonObject, context: ToolContext) -> ToolResult:
+    """在工具工作目录运行 Bash，并限制时间和输出大小。"""
+    process = await asyncio.create_subprocess_exec(
+        "bash",
+        "-c",
+        arguments["command"],
+        cwd=context.cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    chunks: list[str] = []
+    kept = 0
+    truncated = False
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+    async def collect() -> None:
+        nonlocal kept, truncated
+        assert process.stdout is not None
+        while data := await process.stdout.read(4096):
+            text = decoder.decode(data)
+            available = MAX_OUTPUT - kept
+            if len(text) > available:
+                truncated = True
+            text = text[:available]
+            if text:
+                kept += len(text)
+                chunks.append(text)
+                await context.emit(text)
+        remainder = decoder.decode(b"", final=True)
+        if remainder and kept < MAX_OUTPUT:
+            chunks.append(remainder)
+            await context.emit(remainder)
+        await process.wait()
+
+    timed_out = False
+    try:
+        async with asyncio.timeout(arguments.get("timeout", 120)):
+            await collect()
+    except TimeoutError:
+        timed_out = True
+    finally:
+        # 取消/超时都杀整个进程组；也清理 shell 退出后遗留的后台进程。
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.wait()
+    result = "".join(chunks)
+    if truncated:
+        result += "\n[Output truncated at 24000 characters]"
+    if timed_out:
+        return ToolResult(result + "\n[Command timed out; process group killed]", True)
+    return ToolResult(result + f"\n[Exit code: {process.returncode}]", process.returncode != 0)
+
+
+def create_builtin_tools() -> list[Tool]:
+    """创建 Arc CLI 默认提供的 read、write、edit 和 bash 工具。"""
+    path = {"type": "string", "minLength": 1}
+    definitions = [
+        (
+            "read",
+            "Read UTF-8 text with numbered lines. offset is 1-based.",
+            read,
+            {
+                "path": path,
+                "offset": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
+            },
+            ["path"],
+        ),
+        (
+            "write",
+            "Create or overwrite a UTF-8 file. Read existing files before changing them.",
+            write,
+            {"path": path, "content": {"type": "string"}},
+            ["path", "content"],
+        ),
+        (
+            "edit",
+            "Replace exact text; ambiguous matches fail unless replace_all is true.",
+            edit,
+            {
+                "path": path,
+                "old_text": {"type": "string", "minLength": 1},
+                "new_text": {"type": "string"},
+                "replace_all": {"type": "boolean"},
+            },
+            ["path", "old_text", "new_text"],
+        ),
+        (
+            "bash",
+            "Run a shell command in cwd. No sandbox. Output is bounded; timeout in seconds.",
+            bash,
+            {
+                "command": {"type": "string", "minLength": 1},
+                "timeout": {"type": "number", "exclusiveMinimum": 0, "maximum": 600},
+            },
+            ["command"],
+        ),
+    ]
+    return [
+        Tool(
+            ToolSpec(
+                name,
+                description,
+                {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                    "additionalProperties": False,
+                },
+            ),
+            execute,
+        )
+        for name, description, execute, properties, required in definitions
+    ]
