@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from arc_cli.agent import DEFAULT_SYSTEM_PROMPT
+
 
 class CliTests(unittest.TestCase):
     def setUp(self):
@@ -33,6 +35,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.cli("--help").returncode, 0)
         self.assertIn("0.1.0", self.cli("--version").stdout)
         self.assertIn("--no-color", self.cli("--help").stdout)
+
+    def test_default_prompt_is_a_general_assistant_with_discretionary_tools(self):
+        prompt = DEFAULT_SYSTEM_PROMPT.lower()
+        self.assertIn("the assistant provided by arc cli", prompt)
+        self.assertIn("decide whether tools are necessary", prompt)
+        self.assertIn("general-knowledge questions", prompt)
+        self.assertIn("directly without tools", prompt)
+        self.assertNotIn("coding agent", prompt)
 
     def test_missing_model_and_invalid_tools(self):
         result = self.cli("--no-session", "-p", "hi")
