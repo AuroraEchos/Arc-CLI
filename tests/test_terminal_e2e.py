@@ -29,6 +29,22 @@ def text_response(text: str) -> list[bytes]:
     ]
 
 
+def fragmented_text_response(fragments: list[str]) -> list[bytes]:
+    """创建由许多细小增量组成的文本响应。"""
+
+    packets = [
+        _data({"choices": [{"index": 0, "delta": {"content": fragment}, "finish_reason": None}]})
+        for fragment in fragments
+    ]
+    packets.extend(
+        [
+            _data({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+            b"data: [DONE]\n\n",
+        ]
+    )
+    return packets
+
+
 def tool_response(name: str, arguments: dict[str, object]) -> list[bytes]:
     """创建一次包含完整 function call 的流式响应。"""
 
@@ -92,9 +108,9 @@ class MockModelHandler(BaseHTTPRequestHandler):
 class PtyProcess:
     """管理一个连接到真实伪终端的 Arc CLI 子进程。"""
 
-    def __init__(self, cwd: Path, port: int):
+    def __init__(self, cwd: Path, port: int, *, columns: int = 110):
         master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, columns, 0, 0))
         env = os.environ.copy()
         env.update(
             {
@@ -163,14 +179,20 @@ class PtyProcess:
 
 
 class TerminalE2ETests(unittest.TestCase):
-    def run_scenario(self, responses: list[list[bytes]], action) -> tuple[str, MockModelServer]:
+    def run_scenario(
+        self,
+        responses: list[list[bytes]],
+        action,
+        *,
+        columns: int = 110,
+    ) -> tuple[str, MockModelServer]:
         """在本地模型服务和真实 PTY 中运行一个交互场景。"""
 
         server = MockModelServer(responses)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         with tempfile.TemporaryDirectory() as directory:
-            terminal = PtyProcess(Path(directory), server.server_port)
+            terminal = PtyProcess(Path(directory), server.server_port, columns=columns)
             try:
                 terminal.wait_for("arc ▸")
                 action(terminal)
@@ -200,6 +222,48 @@ class TerminalE2ETests(unittest.TestCase):
         self.assertIn("arc", output)
         self.assertIn("PTY ready", output)
         self.assertIn("state", output)
+        self.assertEqual(len(server.requests), 1)
+
+    def test_real_pty_fragmented_chinese_markdown_preserves_output_and_input(self) -> None:
+        fragments = [
+            "# 上",
+            "海大学",
+            "简介\n\n",
+            "上海大学是一所综合",
+            "性研究型大学。\n\n",
+            "## 校区\n\n",
+            "- 宝山校区\n",
+            "- 延长校区\n",
+            "- 嘉定校区\n\n",
+            "**优势学科**：工程、材料与艺术。",
+        ]
+
+        def action(terminal: PtyProcess) -> None:
+            terminal.send("介绍一下上海大学\n")
+            terminal.wait_for("thinking")
+            # 模型仍在输出时预输入命令，验证 prompt 重绘不会吞掉用户输入。
+            terminal.send("/st")
+            terminal.wait_for("**优势学科**：工程、材料与艺术。")
+            terminal.send("atus\n")
+            terminal.wait_for("idle")
+
+        output, server = self.run_scenario(
+            [fragmented_text_response(fragments)],
+            action,
+            columns=48,
+        )
+        for expected in (
+            "# 上海大学简介",
+            "上海大学是一所综合性研究型大学。",
+            "## 校区",
+            "- 宝山校区",
+            "- 延长校区",
+            "- 嘉定校区",
+            "**优势学科**：工程、材料与艺术。",
+        ):
+            self.assertIn(expected, output)
+        self.assertIn("state", output)
+        self.assertIn("idle", output)
         self.assertEqual(len(server.requests), 1)
 
     def test_real_pty_tool_summary_and_last_tool(self) -> None:

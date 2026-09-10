@@ -95,8 +95,8 @@ class Renderer:
         self.color = color and "NO_COLOR" not in os.environ and self.stdout.isatty() and term != "dumb"
         self.dynamic = interactive and self.stderr.isatty() and term != "dumb"
         self.interactive = interactive
-        self.text_open = False
         self.assistant_started = False
+        self._message_buffer = ""
         self.state = "idle"
         self.turn: int | None = None
         self.pending_tool: str | None = None
@@ -200,18 +200,14 @@ class Renderer:
             self.start_activity("thinking")
         elif event.type == "message_start":
             self.assistant_started = False
+            self._message_buffer = ""
         elif event.type == "message_update":
             self.stop_activity()
-            if self.interactive and not self.assistant_started:
-                print(self.paint("arc", CYAN) + " │ ", end="", file=self.stdout, flush=True)
-                self.assistant_started = True
-            print(safe_terminal(str(event.data["delta"])), end="", file=self.stdout, flush=True)
-            self.text_open = True
+            self._message_buffer += safe_terminal(str(event.data["delta"]))
+            self._flush_complete_message_lines()
         elif event.type == "message_end" and event.data["message"]["role"] == "assistant":
             self.stop_activity()
-            if self.text_open:
-                print(file=self.stdout, flush=True)
-                self.text_open = False
+            self._flush_message_tail()
         elif event.type == "tool_execution_start":
             self.stop_activity()
             call = event.data["tool_call"]
@@ -245,6 +241,31 @@ class Renderer:
             self.stop_activity()
             self.state = "idle"
             self.pending_tool = None
+
+    def _flush_complete_message_lines(self) -> None:
+        """仅向输出代理提交完整行，避免 prompt 重绘覆盖流式片段。"""
+
+        while "\n" in self._message_buffer:
+            line, self._message_buffer = self._message_buffer.split("\n", 1)
+            self._write_message_line(line)
+
+    def _flush_message_tail(self) -> None:
+        """在消息结束时提交最后一个没有换行符的片段。"""
+
+        if self._message_buffer:
+            self._write_message_line(self._message_buffer)
+        self._message_buffer = ""
+
+    def _write_message_line(self, line: str) -> None:
+        """原子地写入一行助手文本，并为交互界面保留轻量身份标记。"""
+
+        if not self.interactive:
+            print(line, file=self.stdout, flush=True)
+            self.assistant_started = True
+            return
+        prefix = self.paint("arc", CYAN) + " │ " if not self.assistant_started else "    │ "
+        print(prefix + line, file=self.stdout, flush=True)
+        self.assistant_started = True
 
     def _tool_block(self, snapshot: ToolSnapshot) -> str:
         """生成工具完成事件的紧凑三行块。"""

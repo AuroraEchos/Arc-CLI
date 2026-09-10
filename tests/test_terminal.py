@@ -62,7 +62,20 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         renderer.emit(Event("message_start", {"role": "assistant"}))
         renderer.emit(Event("message_update", {"delta": "first\nsecond"}))
         renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
-        self.assertEqual(output.getvalue(), "arc │ first\nsecond\n")
+        self.assertEqual(output.getvalue(), "arc │ first\n    │ second\n")
+
+    def test_fragmented_multiline_message_is_written_as_complete_lines(self) -> None:
+        output = io.StringIO()
+        renderer = Renderer("text", stdout=output, stderr=output)
+        renderer.emit(Event("message_start", {"role": "assistant"}))
+        for fragment in ("# 上", "海大学", "简介\n\n上海", "大学是", "一所高校。"):
+            renderer.emit(Event("message_update", {"delta": fragment}))
+        renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
+
+        self.assertEqual(
+            output.getvalue(),
+            "arc │ # 上海大学简介\n    │ \n    │ 上海大学是一所高校。\n",
+        )
 
     def test_one_shot_output_remains_script_friendly(self) -> None:
         output = io.StringIO()
@@ -71,6 +84,15 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         renderer.emit(Event("message_update", {"delta": "answer"}))
         renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
         self.assertEqual(output.getvalue(), "answer\n")
+
+    def test_one_shot_fragmented_output_preserves_plain_text(self) -> None:
+        output = io.StringIO()
+        renderer = Renderer("text", interactive=False, stdout=output, stderr=io.StringIO())
+        renderer.emit(Event("message_start", {"role": "assistant"}))
+        for fragment in ("第一", "行\n第", "二行\n"):
+            renderer.emit(Event("message_update", {"delta": fragment}))
+        renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
+        self.assertEqual(output.getvalue(), "第一行\n第二行\n")
 
     def test_tool_output_is_summarized_and_full_result_is_recoverable(self) -> None:
         output = io.StringIO()
