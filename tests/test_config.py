@@ -28,9 +28,6 @@ class ConfigTests(unittest.TestCase):
 
     def test_precedence_and_namespaced_environment(self) -> None:
         self.user_config.write_text('[provider]\nmodel = "user"\nbase_url = "https://user/v1"\n')
-        (self.cwd / ".env").write_text(
-            "ARC_MODEL=dotenv\nARC_BASE_URL=https://dotenv/v1\nARC_API_KEY=dotenv-secret\n"
-        )
         (self.cwd / ".arc").mkdir()
         (self.cwd / ".arc" / "config.toml").write_text('[provider]\nmodel = "project"\n')
         config = load_config(
@@ -45,8 +42,8 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(config.provider.model, "cli")
         self.assertEqual(config.provider.base_url, "https://user/v1")
-        self.assertEqual(config.secrets.api_key, "dotenv-secret")
-        self.assertNotIn("dotenv-secret", repr(config))
+        self.assertEqual(config.secrets.api_key, "env-secret")
+        self.assertNotIn("env-secret", repr(config))
 
     def test_generic_provider_names_are_not_configuration(self) -> None:
         config = load_config(
@@ -62,13 +59,14 @@ class ConfigTests(unittest.TestCase):
         self.assertNotEqual(config.provider.base_url, "https://ignored/v1")
         self.assertEqual(config.secrets.api_key, "")
 
-    def test_dotenv_does_not_mutate_process_environment(self) -> None:
-        (self.cwd / ".env").write_text("ARC_MODEL=local\nARC_API_KEY=local-secret\n")
+    def test_project_dotenv_is_never_loaded(self) -> None:
+        (self.cwd / ".env").write_text("ARC_MODEL=dotenv\nARC_API_KEY=dotenv-secret\n")
         with patch.dict(os.environ, {"UNCHANGED": "yes"}, clear=True):
             before = dict(os.environ)
             config = load_config(self.cwd, user_config_path=self.user_config)
             self.assertEqual(dict(os.environ), before)
-        self.assertEqual(config.secrets.api_key, "local-secret")
+        self.assertEqual(config.provider.model, "")
+        self.assertEqual(config.secrets.api_key, "")
 
     def test_toml_rejects_secrets(self) -> None:
         (self.cwd / ".arc").mkdir()

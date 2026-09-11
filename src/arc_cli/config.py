@@ -9,8 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values
-
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
@@ -50,7 +48,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
         )
 
     if contains_secret(data):
-        raise ValueError(f"Secrets are not allowed in {path}; use ARC_API_KEY or project .env")
+        raise ValueError(f"Secrets are not allowed in {path}; use the ARC_API_KEY environment variable")
     provider = data.get("provider", data)
     if not isinstance(provider, dict):
         raise ValueError(f"Invalid provider config in {path}")
@@ -94,8 +92,8 @@ def load_config(
     """Resolve configuration without mutating ``os.environ``.
 
     Precedence, highest first: CLI, ``.arc/config.toml``, user config,
-    project ``.env``, process environment, defaults. Only namespaced ``ARC_*``
-    provider environment variables are recognized.
+    process environment, defaults. Only namespaced ``ARC_*`` provider
+    environment variables are recognized. Arc never reads a project ``.env``.
     """
 
     environment = os.environ if environ is None else environ
@@ -106,8 +104,6 @@ def load_config(
 
     resolved: dict[str, str] = {"base_url": DEFAULT_BASE_URL, "api_key": ""}
     resolved.update(_provider_values(environment))
-    dotenv = dotenv_values(cwd / ".env") if (cwd / ".env").is_file() else {}
-    resolved.update(_provider_values(dotenv))
     resolved.update(_read_toml(user_config_path))
     resolved.update(_read_toml(cwd / ".arc" / "config.toml"))
     if cli_model:

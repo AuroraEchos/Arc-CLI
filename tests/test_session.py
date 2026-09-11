@@ -9,7 +9,14 @@ from pathlib import Path
 from arc_cli.agent import Arc
 from arc_cli.providers import FakeProvider
 from arc_cli.runtime import ArcSession
-from arc_cli.session import SessionStore, latest_session_path, new_session_path
+from arc_cli.session import (
+    SessionStore,
+    arc_state_directory,
+    input_history_path,
+    latest_session_path,
+    new_session_path,
+    workspace_state_directory,
+)
 from arc_cli.tools import Tool, ToolRegistry, ToolResult
 from arc_cli.types import Message, ProviderEvent, ToolCall, ToolSpec, Usage
 
@@ -103,15 +110,47 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.messages()[0].tool_calls[0].arguments["path"], "original")
 
     def test_latest_and_root(self):
+        state_directory = self.cwd / "state"
         with self.assertRaises(ValueError):
-            latest_session_path(self.cwd)
-        path = new_session_path(self.cwd)
+            latest_session_path(self.cwd, state_directory=state_directory)
+        path = new_session_path(self.cwd, state_directory=state_directory)
         store = SessionStore.create(self.cwd, path)
         self.addCleanup(store.close)
         store.append(Message("user", "hi"))
-        self.assertEqual(latest_session_path(self.cwd), path)
+        self.assertEqual(latest_session_path(self.cwd, state_directory=state_directory), path)
+        self.assertTrue(path.is_relative_to(state_directory / "workspaces"))
+        self.assertFalse((self.cwd / ".arc").exists())
         store.branch("root")
         self.assertEqual(store.messages(), [])
+
+    def test_state_paths_are_global_stable_and_workspace_scoped(self):
+        state_home = self.cwd / "xdg-state"
+        state_directory = state_home / "arc"
+        other_workspace = self.cwd / "other"
+        other_workspace.mkdir()
+
+        self.assertEqual(
+            arc_state_directory({"XDG_STATE_HOME": str(state_home)}),
+            state_directory,
+        )
+        self.assertEqual(
+            workspace_state_directory(self.cwd, state_directory=state_directory),
+            workspace_state_directory(self.cwd, state_directory=state_directory),
+        )
+        self.assertNotEqual(
+            workspace_state_directory(self.cwd, state_directory=state_directory),
+            workspace_state_directory(other_workspace, state_directory=state_directory),
+        )
+        self.assertEqual(
+            input_history_path(self.cwd, state_directory=state_directory).parent,
+            workspace_state_directory(self.cwd, state_directory=state_directory),
+        )
+
+    def test_relative_xdg_state_home_is_ignored(self):
+        self.assertEqual(
+            arc_state_directory({"XDG_STATE_HOME": "relative"}),
+            Path.home() / ".local" / "state" / "arc",
+        )
 
     async def test_runtime_saves_stream_close(self):
         store = self.store()

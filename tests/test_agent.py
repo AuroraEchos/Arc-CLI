@@ -72,6 +72,21 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].data["status"], "complete")
         self.assertFalse(agent.is_running)
 
+    async def test_system_prompt_is_rendered_per_model_request(self):
+        ticks = iter(["first", "second"])
+        agent = self.agent(
+            [call_turn(self.call), answer()],
+            system_prompt=lambda: f"rendered {next(ticks)}",
+        )
+        _ = [event async for event in agent.run("go")]
+        prompts = [request.system_prompt for request in agent.provider.requests]
+        self.assertEqual(prompts, ["rendered first", "rendered second"])
+
+    async def test_static_system_prompt_is_reused(self):
+        agent = self.agent([answer()], system_prompt="fixed")
+        _ = [event async for event in agent.run("go")]
+        self.assertEqual(agent.provider.requests[0].system_prompt, "fixed")
+
     async def test_errors_go_back_to_model(self):
         agent = self.agent([call_turn(ToolCall("x", "unknown", {})), answer("recovered")])
         _ = [event async for event in agent.run("go")]

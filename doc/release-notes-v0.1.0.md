@@ -11,11 +11,13 @@ Arc CLI 0.1.0 是当前 Runtime 基线的首个正式 GitHub Release。本次变
 - 修复 `~/.ssh/config` 等路径被误判为正在执行 `ssh` 命令的问题；
 - Tool subprocess 默认移除 Arc Provider credentials 与常见 ambient secrets；
 - Provider 配置统一为 `ARC_MODEL`、`ARC_BASE_URL` 和 `ARC_API_KEY`；
+- 不再读取项目 `.env`，Provider 配置只使用进程环境、TOML 与 CLI，且 API key 仅来自进程环境；
 - 明确 Arc Core、Profile、用户全局偏好与项目 Workspace 的指令信任边界；
 - 用户偏好支持 `$XDG_CONFIG_HOME/arc/AGENTS.md`，项目 `AGENTS.md` 按存在性加载且不依赖 Profile；
 - `ARC.md` 仅记录 Arc Runtime 自身不变量，不再作为任意工作区的动态指令入口；
 - 稳定 Runtime Event Protocol v1 及 Agent/Turn/Message/Tool 生命周期；
 - 加固 Session reopen、branch、checkpoint、取消和 incomplete tool-call recovery；
+- 默认 Session 与输入历史迁移到 `$XDG_STATE_HOME/arc/`，按工作目录哈希隔离，不再污染项目目录；
 - 改进终端 streaming、steering prompt、tool status 和常用 Markdown 渲染；
 - 增加真实 PTY、Provider、Policy、Secret isolation 与 Session semantics 测试。
 
@@ -36,6 +38,9 @@ ARC_MODEL
 ARC_BASE_URL
 ARC_API_KEY
 ```
+
+请在 `~/.bashrc`、`~/.zshrc` 或操作系统等效位置导出这些变量，并在启动 Arc 前使其进入进程环境。
+Arc 不读取项目 `.env`。
 
 项目不会自动设置 `NO_PROXY`。如某个开发环境确实需要代理例外，应由该环境自行配置。
 

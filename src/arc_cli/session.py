@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
@@ -31,7 +32,7 @@ class SessionStore:
 
         store = cls(cwd, path)
         if store.path:
-            store.path.parent.mkdir(parents=True, exist_ok=True)
+            store.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             descriptor = os.open(store.path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
             store._file = os.fdopen(descriptor, "w+", encoding="utf-8", newline="\n")
             try:
@@ -260,17 +261,43 @@ def repair_incomplete_tools(messages: Sequence[Message]) -> list[Message]:
     return result
 
 
-def new_session_path(cwd: Path) -> Path:
-    """为工作目录生成新的默认会话文件路径。"""
+def arc_state_directory(environ: Mapping[str, str] | None = None) -> Path:
+    """返回符合 XDG 规范的 Arc 用户状态目录。"""
+
+    environment = os.environ if environ is None else environ
+    configured = environment.get("XDG_STATE_HOME")
+    state_home = Path(configured).expanduser() if configured else Path.home() / ".local" / "state"
+    if not state_home.is_absolute():
+        state_home = Path.home() / ".local" / "state"
+    return state_home / "arc"
+
+
+def workspace_state_directory(cwd: Path, *, state_directory: Path | None = None) -> Path:
+    """将规范化工作目录稳定映射到 Arc 状态目录中的隔离空间。"""
+
+    workspace_key = hashlib.sha256(os.fsencode(str(cwd.resolve()))).hexdigest()
+    root = state_directory or arc_state_directory()
+    return root / "workspaces" / workspace_key
+
+
+def input_history_path(cwd: Path, *, state_directory: Path | None = None) -> Path:
+    """返回工作目录对应的全局交互输入历史路径。"""
+
+    return workspace_state_directory(cwd, state_directory=state_directory) / "input-history"
+
+
+def new_session_path(cwd: Path, *, state_directory: Path | None = None) -> Path:
+    """在全局 Arc 状态目录中为工作目录生成新会话路径。"""
 
     name = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8] + ".jsonl"
-    return cwd / ".arc" / "sessions" / name
+    return workspace_state_directory(cwd, state_directory=state_directory) / "sessions" / name
 
 
-def latest_session_path(cwd: Path) -> Path:
-    """返回工作目录中最后修改的 Arc 会话文件。"""
+def latest_session_path(cwd: Path, *, state_directory: Path | None = None) -> Path:
+    """返回全局状态目录中当前工作区最后修改的 Arc 会话文件。"""
 
-    paths = list((cwd / ".arc" / "sessions").glob("*.jsonl"))
+    session_directory = workspace_state_directory(cwd, state_directory=state_directory) / "sessions"
+    paths = list(session_directory.glob("*.jsonl"))
     if not paths:
         raise ValueError("No saved sessions in this working directory")
     return max(paths, key=lambda path: path.stat().st_mtime_ns)

@@ -79,25 +79,28 @@ arc --version
 ```bash
 git clone git@github.com:AuroraEchos/Arc-CLI.git
 cd Arc-CLI
-cp .env.example .env
 uv sync --extra dev
 ```
 
-在要让 Arc 工作的项目目录中创建 `.env` 并配置模型服务：
+通过用户 shell 配置导出 Arc 的模型服务环境变量。例如 Bash 用户可以写入 `~/.bashrc`，Zsh 用户
+可以写入 `~/.zshrc`：
 
-```dotenv
-ARC_BASE_URL=https://api.example.com/v1
-ARC_MODEL=your-tool-capable-model-id
-ARC_API_KEY=your-api-key
+```bash
+export ARC_BASE_URL="https://api.example.com/v1"
+export ARC_MODEL="your-tool-capable-model-id"
+export ARC_API_KEY="your-api-key"
 ```
+
+保存后重新打开终端，或在当前 shell 中执行对应配置文件，再启动 `arc`。Arc 只读取启动进程已经继承
+到的环境变量，不会查找或解析项目 `.env` 文件。
 
 `ARC_BASE_URL` 应是包含 `/v1` 的 API 根路径，而不是完整的 `/chat/completions` 地址。
 Provider 环境变量只接受带命名空间的 `ARC_*` 名称。
 
-配置解析不会调用 `load_dotenv`，因此项目 `.env` 不会修改 Arc 的全局进程环境。完整优先级为：
+完整配置优先级为：
 
 ```text
-CLI > .arc/config.toml > ~/.config/arc/config.toml > project .env > process environment > defaults
+CLI > .arc/config.toml > ~/.config/arc/config.toml > process environment > defaults
 ```
 
 普通 Provider 配置可以写入 TOML：
@@ -108,8 +111,7 @@ model = "your-tool-capable-model-id"
 base_url = "https://api.example.com/v1"
 ```
 
-`api_key` 明确禁止写入 TOML；Secret 只从 `ARC_API_KEY` 或项目 `.env` 读取。
-`.env` 已被 Git 忽略，不应提交。
+`api_key` 明确禁止写入 TOML；Secret 只从 Arc 进程继承的 `ARC_API_KEY` 环境变量读取。
 
 跨项目生效的个人偏好可以写入 `$XDG_CONFIG_HOME/arc/AGENTS.md`；未设置
 `XDG_CONFIG_HOME` 时路径为 `~/.config/arc/AGENTS.md`。例如：
@@ -166,8 +168,8 @@ printf '解释 Arc 的工具循环' | arc --no-session
 # 恢复当前工作目录最近的会话
 arc --continue
 
-# 使用指定会话文件
-arc --session .arc/my-session.jsonl
+# 使用显式指定的会话文件
+arc --session /path/to/my-session.jsonl
 
 # 在另一个工作目录中运行
 arc --cwd /path/to/project --tools read
@@ -194,8 +196,8 @@ JSON 模式和 `--no-color` 同样保留原文，便于脚本消费和复制。
 颜色只用于身份、状态和错误层级。非 TTY 输出不会产生 ANSI 颜色；设置 `NO_COLOR` 环境变量或
 传入 `--no-color` 可以显式关闭颜色。单次执行只向标准输出写入模型正文，JSON 模式保持机器可读。
 
-交互输入支持上下键历史搜索，并可通过 Tab 补全斜杠命令。持久化会话的输入历史保存在
-`.arc/input-history` 中。
+交互输入支持上下键历史搜索，并可通过 Tab 补全斜杠命令。持久化会话的输入历史与 Session 一样，
+保存在 `$XDG_STATE_HOME/arc/` 中对应工作区的隔离目录。
 
 ## 交互命令
 
@@ -270,7 +272,16 @@ follow-up 会在当前工具循环自然结束后进入上下文。取消或失�
 
 ## 会话与上下文
 
-会话默认保存在工作目录的 `.arc/sessions/*.jsonl` 中；`--no-session` 使用纯内存历史。
+会话统一保存在 `$XDG_STATE_HOME/arc/`；未设置 `XDG_STATE_HOME` 时使用 `~/.local/state/arc/`。
+Arc 对规范化工作目录计算稳定哈希，并将默认 Session 与输入历史分别保存在：
+
+```text
+$XDG_STATE_HOME/arc/workspaces/<workspace-hash>/sessions/*.jsonl
+$XDG_STATE_HOME/arc/workspaces/<workspace-hash>/input-history
+```
+
+因此 `arc --continue` 仍只恢复当前工作目录最近的会话，但 Arc 不会在项目根目录创建 `.arc/sessions`
+或 `.arc/input-history`。`--no-session` 使用纯内存历史；`--session` 仍可由用户显式指定其他文件路径。
 每个会话节点都有 `id` 和 `parent`。分支操作只追加 cursor 记录，不删除旧节点，也不会回滚
 已经发生的文件修改或命令副作用。
 

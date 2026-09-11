@@ -33,7 +33,7 @@ from arc_cli.profiles import (
 )
 from arc_cli.providers import OpenAIProvider
 from arc_cli.runtime import ArcSession
-from arc_cli.session import SessionStore, latest_session_path, new_session_path
+from arc_cli.session import SessionStore, input_history_path, latest_session_path, new_session_path
 from arc_cli.terminal import DIM, GREEN, RED, YELLOW, Renderer, safe_terminal
 from arc_cli.tools import ToolRegistry, create_builtin_tools
 from arc_cli.types import EVENT_PROTOCOL_VERSION, Event, Provider
@@ -168,8 +168,9 @@ async def interactive(session: ArcSession, initial: str, renderer: Renderer) -> 
     history: History = InMemoryHistory()
     task: asyncio.Task[int] | None = None
     if session.store.path is not None:
-        history_path = session.agent.cwd / ".arc" / "input-history"
-        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path = input_history_path(session.agent.cwd)
+        history_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        history_path.touch(mode=0o600, exist_ok=True)
         history = FileHistory(str(history_path))
     prompt_session: PromptSession[str] = PromptSession(
         message=renderer.input_prompt,
@@ -330,9 +331,9 @@ async def run(args: argparse.Namespace) -> int:
                 raise ValueError("Saved session cwd no longer exists")
         config = load_config(cwd, cli_model=args.model, cli_base_url=args.base_url)
         if not config.provider.model:
-            raise ValueError("Set ARC_MODEL in the environment/.env or pass --model")
+            raise ValueError("Set ARC_MODEL in the environment or pass --model")
         if config.provider.base_url.rstrip("/") == "https://api.openai.com/v1" and not config.secrets.api_key:
-            raise ValueError("Set ARC_API_KEY in the environment or project .env")
+            raise ValueError("Set ARC_API_KEY in the environment")
         profile = get_profile(args.profile)
         names_value = ",".join(profile.tool_names) if args.tools is None else args.tools
         names = [] if names_value in ("", "none") else [name.strip() for name in names_value.split(",")]
@@ -351,16 +352,13 @@ async def run(args: argparse.Namespace) -> int:
             store = SessionStore.create(cwd, None if args.no_session else (path or new_session_path(cwd)))
         user_preferences = load_user_instructions()
         workspace = load_workspace_instructions(cwd, enabled=not args.no_context)
-        system = build_system_prompt(
-            cwd=cwd,
-            profile=profile,
-        )
         policy = ExecutionPolicy.autonomous() if args.policy == "autonomous" else ExecutionPolicy.restricted()
         agent = Arc(
             provider,
             ToolRegistry([tool for tool in builtins if tool.spec.name in names]),
             cwd=cwd,
-            system_prompt=system,
+            # Re-rendered before every model request so runtime context stays current.
+            system_prompt=lambda: build_system_prompt(cwd=cwd, profile=profile),
             context_prefix=(
                 *global_user_context(user_preferences),
                 *user_context(args.instructions),

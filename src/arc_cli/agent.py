@@ -33,7 +33,7 @@ class Arc:
         tools: ToolRegistry,
         *,
         cwd: Path,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        system_prompt: str | Callable[[], str] = DEFAULT_SYSTEM_PROMPT,
         messages: Sequence[Message] = (),
         context_prefix: Sequence[Message] = (),
         hooks: Hooks | None = None,
@@ -83,6 +83,12 @@ class Arc:
 
         self._steering.clear()
         self._follow_ups.clear()
+
+    def _resolve_system_prompt(self) -> str:
+        """返回静态 System Prompt，或在每次模型请求前重新渲染它。"""
+
+        prompt = self.system_prompt
+        return prompt if isinstance(prompt, str) else prompt()
 
     def _append(self, message: Message) -> Event:
         """保存消息并创建对应的 ``message_end`` 事件。"""
@@ -223,7 +229,11 @@ class Arc:
                 yield Event("message_start", {"role": "assistant"})
                 terminal = None
                 async with aclosing(
-                    self.provider.stream(context, system_prompt=self.system_prompt, tools=self.tools.specs())
+                    self.provider.stream(
+                        context,
+                        system_prompt=self._resolve_system_prompt(),
+                        tools=self.tools.specs(),
+                    )
                 ) as stream:
                     async for event in stream:
                         if terminal is not None:

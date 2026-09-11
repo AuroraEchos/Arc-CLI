@@ -67,8 +67,20 @@ class CliTests(unittest.TestCase):
         result = self.cli("--tools", "bogus", "-p", "hi")
         self.assertEqual(result.returncode, 2)
 
-    def test_dotenv_configuration_is_loaded(self):
+    def test_dotenv_configuration_is_ignored(self):
         (self.cwd / ".env").write_text("ARC_MODEL=test\nARC_BASE_URL=not-a-url\nARC_API_KEY=secret\n")
+        result = self.cli("--no-session", "-p", "hi")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ARC_MODEL", result.stderr)
+
+    def test_namespaced_environment_configuration_is_loaded(self):
+        self.env.update(
+            {
+                "ARC_MODEL": "test",
+                "ARC_BASE_URL": "not-a-url",
+                "ARC_API_KEY": "secret",
+            }
+        )
         result = self.cli("--no-session", "-p", "hi")
         self.assertEqual(result.returncode, 2)
         self.assertIn("base_url", result.stderr)

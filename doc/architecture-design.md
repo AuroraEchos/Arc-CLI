@@ -413,8 +413,8 @@ ARC_API_KEY
 ### 9.2 普通配置与 Secret 分离
 
 普通 Provider 配置使用 `ProviderConfig`，凭据使用 `ProviderSecrets`，后者关闭 dataclass `repr`。
-TOML 明确禁止 `api_key`、`token`、`password` 等 Secret 字段；API key 只从 namespaced environment
-或项目 `.env` 读取。
+TOML 明确禁止 `api_key`、`token`、`password` 等 Secret 字段；API key 只从 Arc 进程继承的
+namespaced environment 读取。Runtime 不查找或解析项目 `.env`。
 
 ### 9.3 优先级
 
@@ -424,7 +424,6 @@ TOML 明确禁止 `api_key`、`token`、`password` 等 Secret 字段；API key �
 CLI
   > project .arc/config.toml
   > user ~/.config/arc/config.toml
-  > project .env
   > process environment
   > defaults
 ```
@@ -432,11 +431,12 @@ CLI
 当前 API key 没有 CLI/TOML 入口，因此 Secret 的实际优先级是：
 
 ```text
-project .env > process ARC_API_KEY > empty
+process ARC_API_KEY > empty
 ```
 
-配置解析使用无副作用读取，不调用会修改 `os.environ` 的 `load_dotenv`。因此 Workspace `.env` 可以
-参与 Arc 配置解析，却不会污染 Arc 进程的全局环境或覆盖其他组件读取到的环境值。
+用户应在 `~/.bashrc`、`~/.zshrc` 或操作系统的等效环境配置中导出 `ARC_MODEL`、`ARC_BASE_URL` 和
+`ARC_API_KEY`，并在启动 Arc 前使配置生效。Arc 只读取已经继承的进程环境，不依赖工作目录中的凭据
+文件。
 
 ## 10. Message 与 Runtime Event Protocol
 
@@ -489,7 +489,21 @@ Message 表示需要恢复的会话事实，Event 表示运行期间可观察的
 
 ## 11. Session、分支与恢复
 
-### 11.1 Append-only JSONL
+### 11.1 用户状态目录
+
+默认 Session 和交互输入历史不写入项目目录，而是统一存放在 `$XDG_STATE_HOME/arc/`；未设置
+`XDG_STATE_HOME` 时回退到 `~/.local/state/arc/`。规范化工作目录经 SHA-256 映射为稳定、隔离的
+workspace key：
+
+```text
+$XDG_STATE_HOME/arc/workspaces/<workspace-key>/sessions/*.jsonl
+$XDG_STATE_HOME/arc/workspaces/<workspace-key>/input-history
+```
+
+Session header 继续保存真实 `cwd`，用于恢复工具工作目录和校验 `--cwd`。`--continue` 只查询当前
+workspace key 下最后修改的 Session，避免不同项目互相串话。`--session` 是用户显式选择路径时的例外。
+
+### 11.2 Append-only JSONL
 
 持久化 Session 使用追加式 JSONL。文件包含：
 
@@ -501,7 +515,7 @@ Message 表示需要恢复的会话事实，Event 表示运行期间可观察的
 文件以 `0600` 创建，并使用非阻塞排他文件锁限制同一 Session 只能有一个 writer。每次写入后 flush
 并 `fsync`，优先保证恢复语义而不是追求最高吞吐。
 
-### 11.2 会话树
+### 11.3 会话树
 
 每个 entry 都保存 parent 指针，因此 Session 天然形成树：
 
@@ -517,13 +531,13 @@ root
 `/branch ID` 只改变逻辑历史的 cursor，并从目标叶节点重建消息。它不会回滚磁盘文件，也不会撤销工具
 已经产生的外部副作用。
 
-### 11.3 Checkpoint 与压缩
+### 11.4 Checkpoint 与压缩
 
 `/compact` 用模型总结较早历史，并保留最近若干完整用户轮次。只有摘要正常完成且非空时才追加
 checkpoint；失败时原历史不变。Checkpoint 会在当前分支的逻辑重建过程中替换之前的上下文，但旧
 节点仍存在于 append-only 文件中，保持可审计与可分支能力。
 
-### 11.4 不完整 ToolCall 修复
+### 11.5 不完整 ToolCall 修复
 
 分支可能落在 assistant ToolCall 与 ToolResult 之间，进程也可能在工具执行中退出。恢复时
 `repair_incomplete_tools()` 会为缺失的结果补一条明确错误：操作已中断，应检查副作用后再重试。

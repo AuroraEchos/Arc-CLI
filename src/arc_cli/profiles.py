@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from arc_cli.types import Message
@@ -121,12 +122,18 @@ def build_system_prompt(
     cwd: Path,
     profile: Profile = DEVELOPER_PROFILE,
 ) -> str:
-    """Render only high-trust Core, Profile, and Runtime instructions."""
+    """Render Core, Profile, and Runtime context for one model request.
+
+    Arc re-renders this before every model request, so the reported time is the
+    request time rather than the session start time.
+    """
+
+    current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
     sections = [
         "[CORE POLICY — immutable, highest trust]\n" + CORE_POLICY,
         f"[PROFILE — {profile.name}]\n{profile.instructions}",
-        f"[RUNTIME CONTEXT]\nWorking directory: {cwd}",
+        f"[RUNTIME CONTEXT]\nWorking directory: {cwd}\nCurrent system time: {current_time}",
     ]
     return "\n\n".join(sections)
 
