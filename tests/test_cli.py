@@ -16,9 +16,12 @@ class CliTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.cwd = Path(self.temp.name)
         (self.cwd / "README.md").write_text("# Test project\nHello\n")
-        self.env = {
-            key: value for key, value in os.environ.items() if key not in ("MODEL", "API_KEY", "BASE_URL")
+        provider_names = {
+            "ARC_MODEL",
+            "ARC_API_KEY",
+            "ARC_BASE_URL",
         }
+        self.env = {key: value for key, value in os.environ.items() if key not in provider_names}
         self.env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
 
     def cli(self, *args, input=""):
@@ -35,13 +38,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.cli("--help").returncode, 0)
         self.assertIn("0.1.0", self.cli("--version").stdout)
         self.assertIn("--no-color", self.cli("--help").stdout)
+        self.assertIn("--no-markdown", self.cli("--help").stdout)
 
     def test_default_prompt_is_a_general_assistant_with_discretionary_tools(self):
         prompt = DEFAULT_SYSTEM_PROMPT.lower()
-        self.assertIn("the assistant provided by arc cli", prompt)
+        self.assertIn("assistant running inside the arc runtime", prompt)
         self.assertIn("decide whether tools are necessary", prompt)
-        self.assertIn("general-knowledge questions", prompt)
-        self.assertIn("directly without tools", prompt)
+        self.assertIn("general knowledge directly", prompt)
+        self.assertIn("runtime authorization is authoritative", prompt)
         self.assertNotIn("coding agent", prompt)
 
     def test_missing_model_and_invalid_tools(self):
@@ -52,7 +56,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
     def test_dotenv_configuration_is_loaded(self):
-        (self.cwd / ".env").write_text("MODEL=test\nBASE_URL=not-a-url\nAPI_KEY=secret\n")
+        (self.cwd / ".env").write_text("ARC_MODEL=test\nARC_BASE_URL=not-a-url\nARC_API_KEY=secret\n")
         result = self.cli("--no-session", "-p", "hi")
         self.assertEqual(result.returncode, 2)
         self.assertIn("base_url", result.stderr)

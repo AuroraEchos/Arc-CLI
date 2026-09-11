@@ -29,6 +29,7 @@ class ArcSession:
         try:
             async with aclosing(self.agent.run(prompt)) as events:
                 async for event in events:
+                    event.validate()
                     self._save()
                     yield event
         finally:

@@ -8,9 +8,11 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import TextIO
 
 from arc_cli import __version__
@@ -23,6 +25,10 @@ GREEN = "\x1b[32m"
 RED = "\x1b[31m"
 YELLOW = "\x1b[33m"
 DIM = "\x1b[2m"
+BOLD = "\x1b[1m"
+ITALIC = "\x1b[3m"
+STRIKE = "\x1b[9m"
+UNDERLINE = "\x1b[4m"
 
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -32,6 +38,16 @@ BANNER = """ █████╗  ██████╗   ██████╗
 ██╔══██║ ██╔══██╗ ██║
 ██║  ██║ ██║  ██║ ╚██████╗
 ╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝"""
+
+INLINE_MARKDOWN = re.compile(
+    r"(?P<code>`[^`\n]+`)"
+    r"|(?P<bold_star>\*\*[^*\n]+\*\*)"
+    r"|(?P<bold_under>__[^_\n]+__)"
+    r"|(?P<strike>~~[^~\n]+~~)"
+    r"|(?P<link>\[[^\]\n]+\]\([^\s)\n]+\))"
+    r"|(?P<italic_star>(?<!\*)\*[^*\n]+\*(?!\*))"
+    r"|(?P<italic_under>(?<!_)_[^_\n]+_(?!_))"
+)
 
 
 def safe_terminal(text: str) -> str:
@@ -58,9 +74,114 @@ def _one_line(value: object, width: int) -> str:
     """将任意值压缩为适合事件标题的一行文本。"""
 
     text = " ".join(safe_terminal(str(value)).split())
-    if len(text) <= width:
+    return _clip_cells(text, width)
+
+
+def _display_width(text: str) -> int:
+    """Approximate terminal cell width without depending on locale state."""
+
+    return sum(
+        0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in "WF" else 1
+        for char in text
+    )
+
+
+def _clip_cells(text: str, width: int, *, tail: bool = False) -> str:
+    """Clip text by terminal cells, optionally retaining its newest tail."""
+
+    if width < 2:
+        return ""
+    if _display_width(text) <= width:
         return text
-    return text[: max(1, width - 1)] + "…"
+    budget = width - 1
+    selected = []
+    used = 0
+    characters = reversed(text) if tail else iter(text)
+    for char in characters:
+        cells = _display_width(char)
+        if used + cells > budget:
+            break
+        selected.append(char)
+        used += cells
+    if tail:
+        return "…" + "".join(reversed(selected))
+    return "".join(selected) + "…"
+
+
+class TerminalMarkdown:
+    """Render common line-oriented Markdown without owning terminal layout."""
+
+    def __init__(self, *, enabled: bool):
+        self.enabled = enabled
+        self.in_fence = False
+
+    def reset(self) -> None:
+        self.in_fence = False
+
+    @staticmethod
+    def _style(text: str, style: str) -> str:
+        return f"{style}{text}{RESET}"
+
+    def _inline(self, text: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            token = match.group(0)
+            kind = match.lastgroup
+            if kind == "code":
+                return self._style(token[1:-1], YELLOW)
+            if kind in ("bold_star", "bold_under"):
+                return self._style(token[2:-2], BOLD)
+            if kind == "strike":
+                return self._style(token[2:-2], STRIKE)
+            if kind == "link":
+                label, url = token[1:].split("](", 1)
+                return self._style(label, UNDERLINE) + self._style(f" ({url[:-1]})", DIM)
+            return self._style(token[1:-1], ITALIC)
+
+        return INLINE_MARKDOWN.sub(replace, text)
+
+    def render_line(self, line: str) -> str:
+        """Render one complete line while retaining fenced-code state."""
+
+        if not self.enabled:
+            return line
+        fence = re.match(r"^\s*```\s*([^`]*)$", line)
+        if fence:
+            if self.in_fence:
+                self.in_fence = False
+                return self._style("╰─", DIM)
+            self.in_fence = True
+            language = fence.group(1).strip()
+            label = f"╭─ code · {language}" if language else "╭─ code"
+            return self._style(label, DIM)
+        if self.in_fence:
+            return self._style("│ ", DIM) + line
+
+        heading = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
+        if heading:
+            return self._style(self._inline(heading.group(1)), BOLD + CYAN)
+        if re.match(r"^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$", line):
+            return self._style("─" * 48, DIM)
+
+        quote = re.match(r"^(\s*)>\s?(.*)$", line)
+        if quote:
+            return quote.group(1) + self._style("│ ", DIM) + self._inline(quote.group(2))
+
+        bullet = re.match(r"^(\s*)[-+*]\s+(.*)$", line)
+        if bullet:
+            body = bullet.group(2)
+            checkbox = re.match(r"^\[([ xX])\]\s+(.*)$", body)
+            marker = "•"
+            if checkbox:
+                marker = "☑" if checkbox.group(1).lower() == "x" else "☐"
+                body = checkbox.group(2)
+            return bullet.group(1) + self._style(marker, CYAN) + " " + self._inline(body)
+
+        ordered = re.match(r"^(\s*)(\d+[.)])\s+(.*)$", line)
+        if ordered:
+            return (
+                ordered.group(1) + self._style(ordered.group(2), CYAN) + " " + self._inline(ordered.group(3))
+            )
+        return self._inline(line)
 
 
 @dataclass(frozen=True)
@@ -72,6 +193,8 @@ class ToolSnapshot:
     arguments: JsonObject
     content: str
     is_error: bool
+    status: str = "complete"
+    duration_ms: int = 0
 
 
 class Renderer:
@@ -83,6 +206,7 @@ class Renderer:
         *,
         color: bool = True,
         interactive: bool = True,
+        markdown: bool = True,
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
     ):
@@ -95,8 +219,11 @@ class Renderer:
         self.color = color and "NO_COLOR" not in os.environ and self.stdout.isatty() and term != "dumb"
         self.dynamic = interactive and self.stderr.isatty() and term != "dumb"
         self.interactive = interactive
+        self.markdown = TerminalMarkdown(enabled=markdown and interactive and self.color)
         self.assistant_started = False
         self._message_buffer = ""
+        self._message_preview_task: asyncio.Task[None] | None = None
+        self._message_ends_newline = False
         self.state = "idle"
         self.turn: int | None = None
         self.pending_tool: str | None = None
@@ -105,6 +232,7 @@ class Renderer:
         self._spinner_task: asyncio.Task[None] | None = None
         self._spinner_label: str | None = None
         self._spinner_frame = 0
+        self._activity_started: float | None = None
         self._invalidate: Callable[[], None] | None = None
 
     def bind_prompt(self, invalidate: Callable[[], None]) -> None:
@@ -123,13 +251,23 @@ class Renderer:
 
         if self._spinner_label is None:
             return ""
+        columns = max(20, shutil.get_terminal_size((88, 24)).columns)
         frame = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
-        return f"{frame} {self._spinner_label}"
+        elapsed = monotonic() - self._activity_started if self._activity_started is not None else 0
+        label = _clip_cells(self._spinner_label, max(8, min(54, columns - 14)))
+        status = f"{frame} {label} · {elapsed:.1f}s"
+        if not self._message_buffer:
+            return _clip_cells(status, columns)
+        width = columns - _display_width(status) - 3
+        if width < 8:
+            return _clip_cells(status, columns)
+        preview = _clip_cells(" ".join(self._message_buffer.split()), width, tail=True)
+        return f"{status} │ {preview}"
 
     def input_prompt(self) -> str:
         """仅在当前任务真正结束后显示下一条输入提示。"""
 
-        return "arc ▸ " if self.state == "idle" else ""
+        return "› " if self.state == "idle" else "↳ "
 
     def paint(self, text: str, style: str) -> str:
         """在启用颜色时为文本应用单个 ANSI 样式。"""
@@ -142,6 +280,7 @@ class Renderer:
         self.stop_activity()
         self._spinner_label = label
         self._spinner_frame = 0
+        self._activity_started = monotonic()
         if not self.dynamic:
             return
         self._redraw_activity()
@@ -158,6 +297,7 @@ class Renderer:
             self.stderr.write("\r\x1b[2K")
             self.stderr.flush()
         self._spinner_label = None
+        self._activity_started = None
         if had_activity and self._invalidate is not None:
             self._invalidate()
 
@@ -183,7 +323,7 @@ class Renderer:
         if self._spinner_label is None:
             return
         frame = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
-        label = self._spinner_label
+        label = self.bottom_toolbar()[2:]
         self.stderr.write(f"\r\x1b[2K{self.paint(frame, CYAN)} {self.paint(label, DIM)}")
         self.stderr.flush()
 
@@ -205,10 +345,20 @@ class Renderer:
             self.start_activity("thinking")
         elif event.type == "message_start":
             self.assistant_started = False
+            self.markdown.reset()
             self._message_buffer = ""
+            self._message_ends_newline = False
+            self._cancel_message_preview()
         elif event.type == "message_update":
-            self._message_buffer += safe_terminal(str(event.data["delta"]))
-            self._flush_complete_message_lines()
+            delta = safe_terminal(str(event.data["delta"]))
+            if not self.interactive:
+                self._write_noninteractive_delta(delta)
+            else:
+                self._message_buffer += delta
+                if self._spinner_label == "thinking":
+                    self._spinner_label = "responding"
+                self._flush_complete_message_lines()
+                self._schedule_message_preview()
         elif event.type == "message_end" and event.data["message"]["role"] == "assistant":
             self._flush_message_tail()
             self.stop_activity()
@@ -220,7 +370,11 @@ class Renderer:
             arguments = dict(call["arguments"])
             self._calls[call_id] = (name, arguments)
             self.pending_tool = name
-            self.start_activity(f"running {name}")
+            title = self._tool_title(ToolSnapshot(call_id, name, arguments, "", False), 54)
+            self.start_activity(f"{name} · {title}")
+        elif event.type == "tool_execution_authorization":
+            # Authorization is reflected by the final status. Keep the active row quiet.
+            return
         elif event.type == "tool_execution_update":
             # 工具的完整输出保留在最终结果中；默认界面只显示动态状态，避免刷屏。
             return
@@ -234,10 +388,12 @@ class Renderer:
                 arguments,
                 str(event.data["content"]),
                 bool(event.data["is_error"]),
+                str(event.data.get("status", "error" if event.data["is_error"] else "complete")),
+                int(event.data.get("duration_ms", 0)),
             )
             self.last_tool = snapshot
             self.pending_tool = None
-            print(self._tool_block(snapshot), file=self.stderr, flush=True)
+            print(self._tool_line(snapshot), file=self.stderr, flush=True)
         elif event.type == "error":
             self.stop_activity()
             print(self.paint(f"error │ {safe_terminal(str(event.data['message']))}", RED), file=self.stderr)
@@ -247,41 +403,90 @@ class Renderer:
             self.pending_tool = None
 
     def _flush_complete_message_lines(self) -> None:
-        """仅向输出代理提交完整行，避免 prompt 重绘覆盖流式片段。"""
+        """Atomically submit complete lines while retaining a partial tail."""
 
-        while "\n" in self._message_buffer:
-            line, self._message_buffer = self._message_buffer.split("\n", 1)
-            self._write_message_line(line)
+        if "\n" not in self._message_buffer:
+            return
+        complete, self._message_buffer = self._message_buffer.rsplit("\n", 1)
+        self._write_message_lines(complete.split("\n"))
+
+    def _schedule_message_preview(self) -> None:
+        """Throttle prompt-managed preview redraws for the incomplete tail."""
+
+        if self._message_preview_task is not None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._message_preview_task = asyncio.create_task(self._preview_after_delay())
+
+    async def _preview_after_delay(self) -> None:
+        current = asyncio.current_task()
+        try:
+            await asyncio.sleep(0.05)
+            if self._invalidate is not None:
+                self._invalidate()
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._message_preview_task is current:
+                self._message_preview_task = None
+
+    def _cancel_message_preview(self) -> None:
+        if self._message_preview_task is not None:
+            self._message_preview_task.cancel()
+            self._message_preview_task = None
 
     def _flush_message_tail(self) -> None:
         """在消息结束时提交最后一个没有换行符的片段。"""
 
+        self._cancel_message_preview()
+        if not self.interactive:
+            if self.assistant_started and not self._message_ends_newline:
+                self.stdout.write("\n")
+                self.stdout.flush()
+            return
         if self._message_buffer:
-            self._write_message_line(self._message_buffer)
+            self._write_message_lines([self._message_buffer])
         self._message_buffer = ""
 
-    def _write_message_line(self, line: str) -> None:
-        """原子地写入一行助手文本，并为交互界面保留轻量身份标记。"""
+    def _write_noninteractive_delta(self, delta: str) -> None:
+        """Stream directly when no prompt_toolkit application can repaint."""
 
-        if not self.interactive:
-            print(line, file=self.stdout, flush=True)
-            self.assistant_started = True
+        if not delta:
             return
-        prefix = self.paint("arc", CYAN) + " │ " if not self.assistant_started else "    │ "
-        print(prefix + line, file=self.stdout, flush=True)
+        self.stdout.write(delta)
+        self.stdout.flush()
         self.assistant_started = True
+        self._message_ends_newline = delta.endswith("\n")
 
-    def _tool_block(self, snapshot: ToolSnapshot) -> str:
-        """生成工具完成事件的紧凑三行块。"""
+    def _write_message_lines(self, lines: list[str]) -> None:
+        """Write complete interactive lines in one StdoutProxy transaction."""
+
+        rendered = []
+        for line in lines:
+            prefix = self.paint("arc", CYAN) + " │ " if not self.assistant_started else "    │ "
+            rendered.append(prefix + self.markdown.render_line(line))
+            self.assistant_started = True
+        self.stdout.write("\n".join(rendered) + "\n")
+        self.stdout.flush()
+
+    def _tool_line(self, snapshot: ToolSnapshot) -> str:
+        """Render one quiet, durable completion summary."""
 
         width = max(48, min(100, shutil.get_terminal_size((88, 24)).columns))
-        title = self._tool_title(snapshot, width - 12)
-        top = self.paint(f"╭─ {snapshot.name} · {title}", CYAN)
-        detail = self._tool_detail(snapshot, width - 4)
-        body = "\n".join(f"│ {line}" for line in detail)
-        status = "error" if snapshot.is_error else "done"
-        bottom = self.paint(f"╰─ {status}", RED if snapshot.is_error else GREEN)
-        return "\n".join(part for part in (top, body, bottom) if part)
+        title = self._tool_title(snapshot, max(12, width // 2))
+        detail = self._tool_detail(snapshot, max(12, width // 2))
+        summary = detail[-1] if detail else ("error" if snapshot.is_error else "done")
+        elapsed = f"{snapshot.duration_ms / 1000:.1f}s"
+        if snapshot.status == "blocked":
+            symbol, style = "!", YELLOW
+        elif snapshot.is_error:
+            symbol, style = "✗", RED
+        else:
+            symbol, style = "✓", GREEN
+        return self.paint(f"{symbol} {snapshot.name}", style) + f" · {title} · {summary} · {elapsed}"
 
     @staticmethod
     def _tool_title(snapshot: ToolSnapshot, width: int) -> str:
@@ -304,43 +509,43 @@ class Renderer:
             more = re.search(r"\[More lines: use offset=(\d+)\]", content)
             if more:
                 read_detail.append(f"more available from line {more.group(1)}")
-            return read_detail
+            return ["; ".join(read_detail)]
         if snapshot.name in ("write", "edit"):
             return ["file updated"] if not snapshot.is_error else [_one_line(content, width)]
         lines = [line for line in content.splitlines() if line.strip()]
         exit_line = next((line for line in reversed(lines) if line.startswith("[Exit code:")), None)
         payload = [line for line in lines if not line.startswith("[Exit code:")]
-        detail: list[str] = []
+        if snapshot.is_error and payload:
+            return [_one_line(payload[-1], width)]
+        test_summary = next(
+            (
+                line
+                for line in reversed(payload)
+                if re.search(r"\b(?:passed|failed|errors?|tests?)\b", line, re.IGNORECASE)
+            ),
+            None,
+        )
+        if test_summary:
+            return [_one_line(test_summary, width)]
+        if payload:
+            return [_one_line(payload[-1], width)]
         if exit_line:
-            detail.append(exit_line.strip("[]"))
-        if len(payload) <= 3:
-            detail.extend(_one_line(line, width) for line in payload)
-        elif payload:
-            detail.extend(_one_line(line, width) for line in payload[:2])
-            detail.append(f"… {len(payload) - 2} more lines; use /last-tool")
-        return detail or ["no output"]
+            return [exit_line.strip("[]")]
+        return ["no output"]
 
     def show_banner(self, session: ArcSession) -> None:
-        """展示品牌标识和当前运行配置。"""
+        """Show the compact everyday startup identity."""
 
-        print(self.paint(BANNER, CYAN), file=self.stdout)
-        print(file=self.stdout)
-        print(f"{self.paint('Arc CLI', CYAN)} {__version__}", file=self.stdout)
-        print(self.paint("terminal-native agent runtime", DIM), file=self.stdout)
-        print(file=self.stdout)
-        self._metadata("model", session.agent.provider.model)
-        self._metadata("cwd", str(session.agent.cwd))
-        self._metadata("session", display_path(session.store.path, session.agent.cwd))
-        self._metadata("tools", " ".join(session.agent.tools.names()) or "(none)")
-        print(file=self.stdout)
-        print(self.paint("History is not context. Side effects are not memories.", DIM), file=self.stdout)
-        self._metadata("note", "tools use local user permissions; cwd is not a sandbox")
+        cwd = display_path(session.agent.cwd, Path.cwd())
+        line = f"ARC {__version__} · {session.agent.provider.model} · {cwd}"
+        print(self.paint(line, CYAN), file=self.stdout)
+        print(self.paint("› task   ↳ steer   /help commands", DIM), file=self.stdout)
         print(file=self.stdout, flush=True)
 
     def show_status(self, session: ArcSession, *, busy: bool) -> None:
         """展示当前模型、会话分支和运行状态。"""
 
-        print(self.paint("Arc CLI", CYAN), file=self.stdout)
+        print(self.paint("ARC", CYAN), file=self.stdout)
         print(self.paint("─" * 44, DIM), file=self.stdout)
         self._metadata("model", session.agent.provider.model)
         self._metadata("cwd", str(session.agent.cwd))
@@ -348,6 +553,7 @@ class Renderer:
         self._metadata("branch", session.store.leaf[:8] if session.store.leaf else "root")
         self._metadata("messages", str(len(session.agent.messages)))
         self._metadata("tools", " ".join(session.agent.tools.names()) or "(none)")
+        self._metadata("effects", " ".join(sorted(session.agent.policy.allowed)) or "(none)")
         self._metadata("state", "running" if busy else self.state)
         if busy and self.turn is not None:
             self._metadata("turn", f"{self.turn} / {session.agent.max_turns}")

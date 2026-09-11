@@ -5,14 +5,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from collections.abc import Iterator
 from contextlib import aclosing, contextmanager
 from pathlib import Path
 from typing import TextIO, cast
 
-from dotenv import load_dotenv
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory, History, InMemoryHistory
@@ -20,13 +18,23 @@ from prompt_toolkit.patch_stdout import StdoutProxy
 from prompt_toolkit.styles import Style
 
 from arc_cli import __version__
-from arc_cli.agent import DEFAULT_SYSTEM_PROMPT, Arc
+from arc_cli.agent import Arc
+from arc_cli.config import load_config
+from arc_cli.policy import ExecutionPolicy
+from arc_cli.profiles import (
+    PROFILES,
+    build_system_prompt,
+    get_profile,
+    load_workspace_instructions,
+    user_context,
+    workspace_context,
+)
 from arc_cli.providers import OpenAIProvider
 from arc_cli.runtime import ArcSession
 from arc_cli.session import SessionStore, latest_session_path, new_session_path
 from arc_cli.terminal import DIM, GREEN, RED, YELLOW, Renderer, safe_terminal
 from arc_cli.tools import ToolRegistry, create_builtin_tools
-from arc_cli.types import Event, Provider
+from arc_cli.types import EVENT_PROTOCOL_VERSION, Effect, Event, Provider
 
 COMMANDS = (
     "/abort",
@@ -47,23 +55,23 @@ COMMANDS = (
     "/tree",
 )
 
-HELP = """普通输入开始任务；任务运行时的普通输入会在下一轮模型请求前补充指令。
-/help              显示帮助
-/abort             取消正在运行的任务（不会回滚已完成的修改）
-/steer TEXT        下一轮注入指令
-/follow-up TEXT    当前任务自然结束后再处理
-/status            查看模型、会话、分支、工具与运行状态
-/last-tool [N]     查看最近一次完整工具结果，或前 N 行
-/history           查看当前分支的分层消息摘要
-/tree              查看会话树，● 为当前节点
-/branch ID         切换到节点 ID 前缀；不回滚磁盘文件
-/new               从空上下文开始（旧历史仍保留在树中）
-/compact [N]       用模型总结旧消息，保留最近 N 个用户轮次，默认 2
-/session           查看会话文件
-/tools             查看启用的工具
-/model [NAME]      查看/切换模型（仅空闲时）
-/clear             清除终端屏幕
-/quit              退出；Ctrl-D 同效；Ctrl-C 取消当前任务
+HELP = """Enter a task at ›. While Arc is running, text entered at ↳ steers the next model turn.
+/help              Show this help
+/abort             Cancel the running task (completed side effects are not rolled back)
+/steer TEXT        Add instructions before the next model turn
+/follow-up TEXT    Queue a task after the current tool loop finishes
+/status            Show model, session, branch, tools, policy, and state
+/last-tool [N]     Show the latest full tool result, optionally limited to N lines
+/history           Show the current branch as message summaries
+/tree              Show the session tree; ● marks the current node
+/branch ID         Continue from a node prefix; disk state is not rolled back
+/new               Start from empty context while retaining the old history tree
+/compact [N]       Summarize older messages, keeping N recent user turns (default 2)
+/session           Show the session file
+/tools             Show enabled tools
+/model [NAME]      Show or change the model while idle
+/clear             Clear the terminal
+/quit              Exit; Ctrl-D also exits and Ctrl-C aborts a running task
 """
 
 
@@ -86,24 +94,48 @@ def patch_terminal_stdout() -> Iterator[None]:
 def parser() -> argparse.ArgumentParser:
     """创建并返回 Arc CLI 参数解析器。"""
 
-    result = argparse.ArgumentParser(description="Arc CLI: a terminal-native agent runtime")
+    result = argparse.ArgumentParser(prog="arc", description="Arc CLI: a terminal-native agent runtime")
     result.add_argument("prompt", nargs="*", help="initial prompt")
     result.add_argument("-p", "--print", dest="print_mode", action="store_true", help="run once and exit")
     result.add_argument("--mode", choices=("text", "json"), default="text", help="JSONL event output")
     result.add_argument("--model")
     result.add_argument("--base-url")
+    result.add_argument("--profile", choices=tuple(PROFILES), default="developer")
     result.add_argument("--cwd", type=Path, help="tool working directory (not a sandbox)")
     sessions = result.add_mutually_exclusive_group()
     sessions.add_argument("--session", type=Path, help="open existing or create a named JSONL session")
     sessions.add_argument("-c", "--continue", dest="continue_session", action="store_true")
     sessions.add_argument("--no-session", action="store_true", help="keep history in memory only")
-    result.add_argument("--tools", default="read,write,edit,bash", help="comma-separated allowlist, or none")
+    result.add_argument("--tools", help="comma-separated allowlist, or none; defaults to profile tools")
+    result.add_argument(
+        "--allow-external", action="store_true", help="preauthorize tool effects classified as external"
+    )
+    result.add_argument(
+        "--allow-destructive",
+        action="store_true",
+        help="preauthorize tool effects classified as destructive",
+    )
+    result.add_argument(
+        "--allow-tool-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="pass one sensitive environment variable to tools; provider names remain blocked",
+    )
+    result.add_argument(
+        "--deny-tool-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="remove one additional environment variable from tools",
+    )
     result.add_argument("--max-turns", type=int, default=20)
     result.add_argument("--max-output-tokens", type=int, default=4096)
     result.add_argument("--timeout", type=float, default=60, help="model network timeout in seconds")
     result.add_argument("--system", default="", help="additional system instructions")
-    result.add_argument("--no-context", action="store_true", help="do not read cwd/AGENTS.md")
+    result.add_argument("--no-context", action="store_true", help="do not read workspace ARC.md/AGENTS.md")
     result.add_argument("--no-color", action="store_true", help="disable ANSI colors")
+    result.add_argument("--no-markdown", action="store_true", help="show raw Markdown in interactive mode")
     result.add_argument("--version", action="version", version=f"Arc CLI {__version__}")
     return result
 
@@ -172,8 +204,8 @@ async def interactive(session: ArcSession, initial: str, renderer: Renderer) -> 
             prompt_session.app.invalidate()
 
     renderer.show_banner(session)
-    # Renderer 已按完整行合并流式文本，无需输出代理再延迟 200 ms 批处理。
-    # 立即提交可以保证最终文本先落到终端，随后才恢复下一条输入提示。
+    # Interactive transcript writes always end in a newline. StdoutProxy can
+    # therefore serialize them above the prompt without losing a partial line.
     with patch_terminal_stdout():
         renderer.bind_streams(sys.stdout, sys.stdout)
         try:
@@ -270,15 +302,6 @@ async def run(args: argparse.Namespace) -> int:
     cwd = (args.cwd or Path.cwd()).resolve()
     if not cwd.is_dir():
         raise ValueError("cwd must be an existing directory")
-    load_dotenv(cwd / ".env", override=True)
-    model = args.model or os.environ.get("MODEL")
-    base_url = args.base_url or os.environ.get("BASE_URL", "https://api.openai.com/v1")
-    key = os.environ.get("API_KEY", "")
-    names = [] if args.tools in ("", "none") else args.tools.split(",")
-    builtins = create_builtin_tools()
-    unknown = set(names) - {tool.spec.name for tool in builtins}
-    if unknown:
-        raise ValueError(f"Unknown tools: {', '.join(sorted(unknown))}")
     if args.max_turns < 1 or args.max_output_tokens < 1 or args.timeout <= 0:
         raise ValueError("Limits must be positive")
     prompt = " ".join(args.prompt)
@@ -288,18 +311,8 @@ async def run(args: argparse.Namespace) -> int:
         prompt = "\n\n".join(part for part in (prompt, piped) if part)
     if one_shot and not prompt:
         raise ValueError("A prompt is required (argument or stdin)")
-    if not model:
-        raise ValueError("Set MODEL in .env or pass --model")
-    if base_url.rstrip("/") == "https://api.openai.com/v1" and not key:
-        raise ValueError("Set API_KEY in .env")
-    provider: Provider = OpenAIProvider(
-        model=model,
-        api_key=key,
-        base_url=base_url,
-        timeout=args.timeout,
-        max_output_tokens=args.max_output_tokens,
-    )
-    store = None
+    store: SessionStore | None = None
+    provider: Provider | None = None
     try:
         path = latest_session_path(cwd) if args.continue_session else args.session
         if path and path.exists():
@@ -309,30 +322,63 @@ async def run(args: argparse.Namespace) -> int:
             cwd = store.cwd
             if not cwd.is_dir():
                 raise ValueError("Saved session cwd no longer exists")
-        else:
+        config = load_config(cwd, cli_model=args.model, cli_base_url=args.base_url)
+        if not config.provider.model:
+            raise ValueError("Set ARC_MODEL in the environment/.env or pass --model")
+        if config.provider.base_url.rstrip("/") == "https://api.openai.com/v1" and not config.secrets.api_key:
+            raise ValueError("Set ARC_API_KEY in the environment or project .env")
+        profile = get_profile(args.profile)
+        names_value = ",".join(profile.tool_names) if args.tools is None else args.tools
+        names = [] if names_value in ("", "none") else [name.strip() for name in names_value.split(",")]
+        builtins = create_builtin_tools()
+        unknown = set(names) - {tool.spec.name for tool in builtins}
+        if unknown:
+            raise ValueError(f"Unknown tools: {', '.join(sorted(unknown))}")
+        provider = OpenAIProvider(
+            model=config.provider.model,
+            api_key=config.secrets.api_key,
+            base_url=config.provider.base_url,
+            timeout=args.timeout,
+            max_output_tokens=args.max_output_tokens,
+        )
+        if store is None:
             store = SessionStore.create(cwd, None if args.no_session else (path or new_session_path(cwd)))
-        system = f"{DEFAULT_SYSTEM_PROMPT}\nWorking directory: {cwd}\n{args.system}"
-        context_path = cwd / "AGENTS.md"
-        if not args.no_context and context_path.is_file():
-            if context_path.stat().st_size > 32_768:
-                raise ValueError("AGENTS.md exceeds 32 KiB; use --no-context or shorten it")
-            system += "\nProject instructions (AGENTS.md):\n" + context_path.read_text(encoding="utf-8")
+        workspace = load_workspace_instructions(cwd, profile=profile, enabled=not args.no_context)
+        system = build_system_prompt(
+            cwd=cwd,
+            profile=profile,
+        )
+        allowed_effects: set[Effect] = {"read", "write", "process"}
+        if args.allow_external:
+            allowed_effects.add("external")
+        if args.allow_destructive:
+            allowed_effects.add("destructive")
         agent = Arc(
             provider,
             ToolRegistry([tool for tool in builtins if tool.spec.name in names]),
             cwd=cwd,
             system_prompt=system,
+            context_prefix=(*workspace_context(workspace), *user_context(args.system)),
+            policy=ExecutionPolicy(allowed=allowed_effects),
+            tool_env_allow_sensitive=args.allow_tool_env,
+            tool_env_deny=args.deny_tool_env,
             max_turns=args.max_turns,
         )
         session = ArcSession(agent, store)
-        renderer = Renderer(args.mode, color=not args.no_color, interactive=not one_shot)
+        renderer = Renderer(
+            args.mode,
+            color=not args.no_color,
+            interactive=not one_shot,
+            markdown=not args.no_markdown,
+        )
         if one_shot:
             return await consume(session, prompt, renderer)
         return await interactive(session, prompt, renderer)
     finally:
         if store:
             store.close()
-        await provider.aclose()
+        if provider:
+            await provider.aclose()
 
 
 def main() -> None:
@@ -345,7 +391,16 @@ def main() -> None:
         code = 130
     except (ValueError, OSError, RuntimeError) as exc:
         if args.mode == "json":
-            print(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
+            print(
+                json.dumps(
+                    {
+                        "protocol_version": EVENT_PROTOCOL_VERSION,
+                        "type": "error",
+                        "message": str(exc),
+                    },
+                    ensure_ascii=False,
+                )
+            )
         else:
             print(safe_terminal(f"arc: {exc}"), file=sys.stderr)
         code = 2

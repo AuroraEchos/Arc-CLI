@@ -11,6 +11,23 @@ JsonObject: TypeAlias = dict[str, Any]
 
 Role = Literal["user", "assistant", "tool", "summary", "note"]
 StopReason = Literal["stop", "tool_use", "length", "error", "aborted"]
+Effect = Literal["read", "write", "process", "external", "destructive"]
+
+EVENT_PROTOCOL_VERSION = 1
+EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "agent_start": ("status",),
+    "turn_start": ("turn",),
+    "message_start": ("role",),
+    "message_update": ("delta",),
+    "message_end": ("message",),
+    "tool_execution_start": ("tool_call", "effects"),
+    "tool_execution_authorization": ("call_id", "status", "effects", "reason"),
+    "tool_execution_update": ("call_id", "delta", "duration_ms"),
+    "tool_execution_end": ("call_id", "content", "is_error", "status", "duration_ms"),
+    "turn_end": ("turn", "stop_reason"),
+    "error": ("message",),
+    "agent_end": ("status",),
+}
 
 
 @dataclass(frozen=True)
@@ -124,7 +141,20 @@ class Event:
     def to_dict(self) -> JsonObject:
         """将事件类型和载荷展平为可序列化字典。"""
 
-        return {"type": self.type, **self.data}
+        return {**self.data, "protocol_version": EVENT_PROTOCOL_VERSION, "type": self.type}
+
+    def validate(self) -> None:
+        """Validate known protocol event names and their stable required fields."""
+
+        required = EVENT_REQUIRED_FIELDS.get(self.type)
+        if required is None:
+            raise ValueError(f"Unknown event type: {self.type}")
+        reserved = {"type", "protocol_version"} & self.data.keys()
+        if reserved:
+            raise ValueError(f"Reserved event fields in data: {', '.join(sorted(reserved))}")
+        missing = [name for name in required if name not in self.data]
+        if missing:
+            raise ValueError(f"Missing fields for {self.type}: {', '.join(missing)}")
 
 
 class Provider(Protocol):

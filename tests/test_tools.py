@@ -7,7 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from arc_cli.tools import MAX_OUTPUT, ToolContext, ToolRegistry, create_builtin_tools
+from arc_cli.tools import (
+    MAX_OUTPUT,
+    ToolContext,
+    ToolRegistry,
+    create_builtin_tools,
+    sanitized_subprocess_env,
+)
 from arc_cli.types import ToolCall
 
 
@@ -80,6 +86,58 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(str(self.cwd), result.content)
         self.assertIn("Exit code: 7", result.content)
         self.assertIn("hello", "".join(self.updates))
+
+    async def test_bash_never_inherits_provider_or_ambient_secrets(self):
+        context = ToolContext(
+            self.cwd,
+            self.context.emit,
+            {
+                "PATH": os.environ.get("PATH", ""),
+                "ARC_API_KEY": "arc-secret",
+                "ARC_BASE_URL": "https://provider.invalid/v1",
+                "OTHER_TOKEN": "ambient-secret",
+                "SAFE_VALUE": "visible",
+            },
+        )
+        result = await self.registry.execute(
+            ToolCall(
+                "env",
+                "bash",
+                {
+                    "command": "printf '%s|%s|%s|%s' \"${ARC_API_KEY-missing}\" "
+                    '"${ARC_BASE_URL-missing}" "${OTHER_TOKEN-missing}" '
+                    '"${SAFE_VALUE-missing}"'
+                },
+            ),
+            context,
+        )
+        self.assertEqual(result.content.splitlines()[0], "missing|missing|missing|visible")
+        self.assertNotIn("secret", result.content)
+
+    def test_sensitive_allowlist_cannot_reenable_provider_names(self):
+        env = sanitized_subprocess_env(
+            {"ARC_API_KEY": "no", "OTHER_TOKEN": "yes"},
+            allow_sensitive=("ARC_API_KEY", "OTHER_TOKEN"),
+        )
+        self.assertNotIn("ARC_API_KEY", env)
+        self.assertEqual(env["OTHER_TOKEN"], "yes")
+
+    async def test_bash_sensitive_allowlist_is_explicit_and_provider_safe(self):
+        context = ToolContext(
+            self.cwd,
+            self.context.emit,
+            {"ARC_API_KEY": "never", "OTHER_TOKEN": "visible"},
+            ("ARC_API_KEY", "OTHER_TOKEN"),
+        )
+        result = await self.registry.execute(
+            ToolCall(
+                "env-allow",
+                "bash",
+                {"command": 'printf \'%s|%s\' "${ARC_API_KEY-missing}" "${OTHER_TOKEN-missing}"'},
+            ),
+            context,
+        )
+        self.assertEqual(result.content.splitlines()[0], "missing|visible")
 
     async def test_bash_bounded_output(self):
         result = await self.execute("bash", command="head -c 50000 /dev/zero | tr '\\0' x")

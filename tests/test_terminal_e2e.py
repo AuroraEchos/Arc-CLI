@@ -114,9 +114,9 @@ class PtyProcess:
         env = os.environ.copy()
         env.update(
             {
-                "API_KEY": "test-key",
-                "BASE_URL": f"http://127.0.0.1:{port}/v1",
-                "MODEL": "arc-pty-model",
+                "ARC_API_KEY": "test-key",
+                "ARC_BASE_URL": f"http://127.0.0.1:{port}/v1",
+                "ARC_MODEL": "arc-pty-model",
                 "NO_PROXY": "127.0.0.1,localhost",
                 "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
                 "TERM": "xterm-256color",
@@ -194,7 +194,7 @@ class TerminalE2ETests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             terminal = PtyProcess(Path(directory), server.server_port, columns=columns)
             try:
-                terminal.wait_for("arc ▸")
+                terminal.wait_for("/help commands")
                 action(terminal)
                 terminal.close()
                 output = terminal.output.decode(errors="replace")
@@ -215,8 +215,8 @@ class TerminalE2ETests(unittest.TestCase):
             terminal.wait_for("idle")
 
         output, server = self.run_scenario([text_response("PTY ready")], action)
-        self.assertIn("Arc CLI", output)
-        self.assertIn("terminal-native agent runtime", output)
+        self.assertIn("ARC 0.1.0", output)
+        self.assertIn("↳ steer", output)
         self.assertIn("arc-pty-model", output)
         self.assertIn("thinking", output)
         self.assertIn("arc", output)
@@ -243,7 +243,7 @@ class TerminalE2ETests(unittest.TestCase):
             terminal.wait_for("thinking")
             # 模型仍在输出时预输入命令，验证 prompt 重绘不会吞掉用户输入。
             terminal.send("/st")
-            terminal.wait_for("**优势学科**：工程、材料与艺术。")
+            terminal.wait_for("工程、材料与艺术。")
             terminal.send("atus\n")
             terminal.wait_for("idle")
 
@@ -253,23 +253,52 @@ class TerminalE2ETests(unittest.TestCase):
             columns=48,
         )
         for expected in (
-            "# 上海大学简介",
+            "上海大学简介",
             "上海大学是一所综合性研究型大学。",
-            "## 校区",
-            "- 宝山校区",
-            "- 延长校区",
-            "- 嘉定校区",
-            "**优势学科**：工程、材料与艺术。",
+            "校区",
+            "宝山校区",
+            "延长校区",
+            "嘉定校区",
+            "工程、材料与艺术。",
         ):
             self.assertIn(expected, output)
+        self.assertNotIn("# 上海大学简介", output)
+        self.assertNotIn("**优势学科**", output)
         self.assertIn("state", output)
         self.assertIn("idle", output)
         question_end = output.find("介绍一下上海大学") + len("介绍一下上海大学")
-        answer_end = output.find("**优势学科**：工程、材料与艺术。")
+        answer_end = output.find("工程、材料与艺术。") + len("工程、材料与艺术。")
         self.assertGreater(question_end, len("介绍一下上海大学"))
         self.assertGreater(answer_end, question_end)
-        self.assertNotIn("arc ▸", output[question_end:answer_end])
-        self.assertIn("arc ▸", output[answer_end:])
+        self.assertIn("↳ ", output[question_end:answer_end])
+        self.assertIn("› ", output[answer_end:])
+        self.assertEqual(len(server.requests), 1)
+
+    def test_real_pty_unbroken_cjk_stream_and_prefilled_input_are_not_overwritten(self) -> None:
+        expected = (
+            "**流式验证**：中文片段不会被重绘覆盖，`inline_code` 保持完整，"
+            "同时已经输入一半的终端命令也不会丢失。"
+        )
+        fragments = [expected[index : index + 2] for index in range(0, len(expected), 2)]
+
+        def action(terminal: PtyProcess) -> None:
+            terminal.send("stream one long line\n")
+            terminal.wait_for("thinking")
+            terminal.send("/sta")
+            terminal.wait_for("终端命令也不会丢失。")
+            terminal.wait_for("\x1b[36marc\x1b[0m │")
+            terminal.send("tus\n")
+            terminal.wait_for("idle")
+
+        output, server = self.run_scenario([fragmented_text_response(fragments)], action, columns=44)
+        self.assertIn("流式验证", output)
+        self.assertIn("中文片段不会被重绘覆盖", output)
+        self.assertIn("inline_code", output)
+        self.assertIn("终端命令也不会丢失。", output)
+        self.assertNotIn("**流式验证**", output)
+        self.assertIn("/status", output)
+        self.assertIn("state", output)
+        self.assertIn("idle", output)
         self.assertEqual(len(server.requests), 1)
 
     def test_real_pty_tool_summary_and_last_tool(self) -> None:
@@ -287,10 +316,9 @@ class TerminalE2ETests(unittest.TestCase):
 
         output, server = self.run_scenario(responses, action)
         # prompt_toolkit 使用增量光标更新，状态文本在原始 PTY 字节中可能被控制序列分段。
-        self.assertIn("ing bash", output)
-        self.assertIn("╭─ bash", output)
-        self.assertIn("Exit code: 0", output)
-        self.assertIn("╰─ done", output)
+        self.assertIn("bash", output)
+        self.assertIn("✓ bash", output)
+        self.assertIn("pty-tool-ok", output)
         self.assertIn("tool complete", output)
         self.assertIn("/last-tool", output)
         self.assertEqual(len(server.requests), 2)
@@ -311,8 +339,8 @@ class TerminalE2ETests(unittest.TestCase):
             terminal.wait_for("current")
 
         output, server = self.run_scenario(responses, action)
-        self.assertIn("Exit code: 7", output)
-        self.assertIn("╰─ error", output)
+        self.assertIn("expected-failure", output)
+        self.assertIn("✗ bash", output)
         self.assertIn("tool:bash error", output)
         self.assertIn("●", output)
         self.assertIn("current", output)
@@ -323,7 +351,7 @@ class TerminalE2ETests(unittest.TestCase):
 
         def action(terminal: PtyProcess) -> None:
             terminal.send("start a slow command\n")
-            terminal.wait_for("ing bash")
+            terminal.wait_for("bash")
             terminal.send("\x03")
             terminal.wait_for("aborted")
             terminal.send("/status\n")
@@ -333,7 +361,8 @@ class TerminalE2ETests(unittest.TestCase):
         self.assertIn("aborted", output)
         self.assertIn("state", output)
         self.assertIn("idle", output)
-        self.assertNotIn("slow-finished", output)
+        self.assertNotIn("✓ bash", output)
+        self.assertNotIn("arc │ slow-finished", output)
         self.assertEqual(len(server.requests), 1)
 
 

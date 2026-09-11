@@ -2,7 +2,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.arc/
+.arc/*
+!.arc/config.toml
 .env
 .ruff_cache/
 .mypy_cache/

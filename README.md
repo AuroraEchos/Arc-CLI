@@ -15,13 +15,16 @@
 
 <p><code>branchable sessions</code> · <code>explicit context projection</code> · <code>validated tool execution</code></p>
 
-<p><em>History is not context. Side effects are not memories.</em></p>
+<p><em>Great truths are always simple.</em></p>
 
 </div>
 
 ---
 
 Arc CLI 是一个终端原生 Agent Runtime，支持可分支会话、显式上下文投影与可校验工具执行。
+
+当前正式发布版本为 **v0.1.0**。本轮 Runtime、安全边界与终端体验改进继续作为 0.1.0 的稳定修复
+发布，暂不启用新的次版本号。
 
 Arc 是运行在 Arc CLI 中的助手。它根据当前请求判断是否需要工具，按顺序执行模型请求的工具，
 将可验证的工具结果写回历史，并继续推理，直到任务完成、被取消或达到轮次上限。
@@ -51,6 +54,28 @@ Arc 是运行在 Arc CLI 中的助手。它根据当前请求判断是否需要�
 
 ## 安装与配置
 
+### 从 GitHub Release 安装（推荐）
+
+Arc 目前发布为 GitHub Release 中的 Python wheel。使用 [uv](https://docs.astral.sh/uv/) 可以将
+`arc` 安装为隔离的全局命令：
+
+```bash
+uv tool install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.0/arc_cli-0.1.0-py3-none-any.whl"
+arc --version
+```
+
+也可以使用 pipx：
+
+```bash
+pipx install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.0/arc_cli-0.1.0-py3-none-any.whl"
+arc --version
+```
+
+升级或重新安装同一个 `0.1.0` 修复版本时，可以分别使用 `uv tool install --force URL` 或
+`pipx install --force URL`。Release 同时提供源码包，适合需要自行构建的用户。
+
+### 从源码开发
+
 ```bash
 git clone git@github.com:AuroraEchos/Arc-CLI.git
 cd Arc-CLI
@@ -58,18 +83,33 @@ cp .env.example .env
 uv sync --extra dev
 ```
 
-在 `.env` 中配置模型服务：
+在要让 Arc 工作的项目目录中创建 `.env` 并配置模型服务：
 
 ```dotenv
-BASE_URL=https://api.example.com/v1
-MODEL=your-tool-capable-model-id
-API_KEY=your-api-key
-# NO_PROXY=api.example.com
+ARC_BASE_URL=https://api.example.com/v1
+ARC_MODEL=your-tool-capable-model-id
+ARC_API_KEY=your-api-key
 ```
 
-`BASE_URL` 应是包含 `/v1` 的 API 根路径，而不是完整的 `/chat/completions` 地址。
-配置优先级为命令行参数、工作目录中的 `.env`、已有进程环境变量；密钥仅从
-`API_KEY` 读取。`.env` 已被 Git 忽略，不应提交。
+`ARC_BASE_URL` 应是包含 `/v1` 的 API 根路径，而不是完整的 `/chat/completions` 地址。
+Provider 环境变量只接受带命名空间的 `ARC_*` 名称。
+
+配置解析不会调用 `load_dotenv`，因此项目 `.env` 不会修改 Arc 的全局进程环境。完整优先级为：
+
+```text
+CLI > .arc/config.toml > ~/.config/arc/config.toml > project .env > process environment > defaults
+```
+
+普通 Provider 配置可以写入 TOML：
+
+```toml
+[provider]
+model = "your-tool-capable-model-id"
+base_url = "https://api.example.com/v1"
+```
+
+`api_key` 明确禁止写入 TOML；Secret 只从 `ARC_API_KEY` 或项目 `.env` 读取。
+`.env` 已被 Git 忽略，不应提交。
 
 如果不使用 uv，也可以安装为普通 Python 项目：
 
@@ -80,54 +120,63 @@ python3 -m venv .venv
 
 ## 快速开始
 
+通过 GitHub Release 安装后直接使用 `arc`。如果正在源码仓库中开发，可以将下面命令中的 `arc`
+替换为 `uv run arc`。
+
 启动交互模式：
 
 ```bash
-uv run arc
+arc
 ```
 
 执行一次只读任务：
 
 ```bash
-uv run arc --tools read -p "阅读 README.md 并解释项目架构"
+arc --tools read -p "阅读 README.md 并解释项目架构"
 ```
 
 允许 Arc 修改项目并执行命令：
 
 ```bash
-uv run arc --tools read,write,edit,bash -p "为这个项目实现一个小功能"
+arc --tools read,write,edit,bash -p "为这个项目实现一个小功能"
 ```
 
 其他常用方式：
 
 ```bash
 # 输出 JSONL 事件
-uv run arc --no-session --mode json "展示运行时事件"
+arc --no-session --mode json "展示运行时事件"
 
 # 从标准输入读取提示词
-printf '解释 Arc 的工具循环' | uv run arc --no-session
+printf '解释 Arc 的工具循环' | arc --no-session
 
 # 恢复当前工作目录最近的会话
-uv run arc --continue
+arc --continue
 
 # 使用指定会话文件
-uv run arc --session .arc/my-session.jsonl
+arc --session .arc/my-session.jsonl
 
 # 在另一个工作目录中运行
-uv run arc --cwd /path/to/project --tools read
+arc --cwd /path/to/project --tools read
 ```
 
 ## 终端体验
 
 Arc CLI 遵循一条 UI 原则：**让用户看见 Agent 的过程，但不要让过程打扰用户。**
 
-交互模式以 `arc ▸` 作为输入提示。模型请求、工具执行和上下文压缩期间，底部状态栏会使用
-Braille spinner 在同一行显示 `thinking`、`running bash` 或 `compacting`。状态变化不会新增日志行，
-也不会覆盖正在输入的内容。当前任务结束前，spinner 会持续显示并隐藏下一条 `arc ▸`；任务真正
-结束后才恢复输入提示，避免把流式回答误认为已经完成。
+交互模式用 `›` 表示空闲任务输入，用 `↳` 表示运行中的 steering。模型请求、工具执行和上下文压缩
+期间，底部状态栏会使用 Braille spinner 在同一行显示状态、目标与 elapsed time，例如
+`⠸ bash · pytest -q · 4.8s`。任务完成后只保留单行摘要，例如
+`✓ bash · pytest -q · 84 passed · 6.2s`。
 
-模型文本使用轻量的 `arc │` 标识。工具完成后只显示名称、目标、状态和少量摘要；完整结果保留在
-运行时中，可通过 `/last-tool` 查看。这样可以同时保留可观察性和阅读节奏。
+模型文本使用轻量的 `arc │` 标识。完整行会原子提交到 transcript；尚未换行的 tail 以 50 ms
+节流显示在 prompt_toolkit 管理的状态栏中，消息结束时再原子提交，因此不会和输入区重绘竞争。
+非交互模式仍直接逐 fragment 输出。工具原始输出不刷屏，完整结果可通过 `/last-tool` 查看。
+
+交互式彩色终端会把常用 Markdown 映射为终端样式，包括标题、粗体、斜体、删除线、行内代码、
+链接、引用、列表、任务列表、分隔线和 fenced code block。渲染仍以完整行为边界，因此不会破坏
+流式输出与 prompt_toolkit 的原子写入规则。`--no-markdown` 可显示原始 Markdown；单次执行、管道、
+JSON 模式和 `--no-color` 同样保留原文，便于脚本消费和复制。
 
 颜色只用于身份、状态和错误层级。非 TTY 输出不会产生 ANSI 颜色；设置 `NO_COLOR` 环境变量或
 传入 `--no-color` 可以显式关闭颜色。单次执行只向标准输出写入模型正文，JSON 模式保持机器可读。
@@ -178,12 +227,18 @@ follow-up 会在当前工具循环自然结束后进入上下文。取消或失�
 
 ## 架构
 
+更完整的设计原则、运行时生命周期、安全边界与演进路线见
+[`doc/architecture-design.md`](doc/architecture-design.md)。
+
 | 模块 | 职责 |
 | --- | --- |
-| [`types.py`](src/arc_cli/types.py) | 消息、工具、事件、用量与 Provider 协议 |
+| [`types.py`](src/arc_cli/types.py) | 消息、工具、版本化事件、用量与 Provider 协议 |
 | [`providers.py`](src/arc_cli/providers.py) | OpenAI 兼容 HTTP/SSE 协议适配与测试替身 |
 | [`agent.py`](src/arc_cli/agent.py) | Arc 多轮工具循环、事件、取消和任务队列 |
 | [`tools.py`](src/arc_cli/tools.py) | 工具注册、参数校验以及内置文件和 shell 工具 |
+| [`policy.py`](src/arc_cli/policy.py) | Tool effect 分类与执行前 Runtime 授权 |
+| [`profiles.py`](src/arc_cli/profiles.py) | Arc Core、Developer Profile 与指令信任层 |
+| [`config.py`](src/arc_cli/config.py) | 无环境副作用的分层配置与 Secret 解析 |
 | [`hooks.py`](src/arc_cli/hooks.py) | 工具执行前拦截与执行后结果转换 |
 | [`context.py`](src/arc_cli/context.py) | 历史到模型上下文的投影和摘要压缩 |
 | [`session.py`](src/arc_cli/session.py) | JSONL 会话树、分支、恢复、检查点与文件锁 |
@@ -191,8 +246,9 @@ follow-up 会在当前工具循环自然结束后进入上下文。取消或失�
 | [`terminal.py`](src/arc_cli/terminal.py) | 品牌界面、状态动画、工具摘要和历史展示 |
 | [`cli.py`](src/arc_cli/cli.py) | 参数解析、配置加载和交互命令调度 |
 
-核心依赖方向保持单向：终端层消费运行时事件，运行时组合 Arc 与会话存储，Arc 只依赖
-Provider、工具和统一消息类型。Provider 不执行工具，会话存储也不参与模型决策。
+核心概念为 `Arc Runtime + Profile + Tools + Policy`。Developer 只是当前默认 Profile；Arc loop
+本身不再假设自己是 Coding Agent。终端层消费运行时事件，Provider 不执行工具，会话存储也不参与
+模型决策。
 
 ## 会话与上下文
 
@@ -206,13 +262,28 @@ Provider、工具和统一消息类型。Provider 不执行工具，会话存储
 会话文件可能记录提示词、模型回复、源码、工具参数和工具结果。新建文件权限为 `0600`，
 并使用排他锁限制为单写入者。不要上传或提交包含敏感数据的会话文件。
 
-Arc CLI 默认读取工作目录中的 `AGENTS.md`，文件上限为 32 KiB；使用 `--no-context`
-可以禁用。`/compact` 会调用模型并可能产生费用。
+Arc CLI 优先支持工作目录中的 `ARC.md`；Developer Profile 同时兼容 `AGENTS.md`，每个文件上限
+32 KiB；使用 `--no-context` 可以禁用。两者都以非持久化、非 system 的低信任 Workspace Context
+发送，不能改变 Runtime Policy。`/compact` 会调用模型并可能产生费用。
 
 ## 安全边界
 
-Arc CLI 是本机开发工具，不是安全沙箱，也不包含完整的权限审批系统。内置工具可解析绝对路径，
-`bash` 继承当前进程的环境与用户权限。即使只启用 `read`，也不应将其视为目录隔离机制。
+Arc CLI 是本机开发工具，不是操作系统沙箱。内置工具可解析绝对路径，即使只启用 `read`，也不应
+将其视为目录隔离机制。
+
+每次工具调用遵循 `Model proposes → Arc authorizes → Tool executes`。工具声明
+`read / write / process / external / destructive` effect；默认允许前三种，后两种需要 approval handler
+或显式 `--allow-external / --allow-destructive` 预授权。Policy 拒绝发生在 Hook 和 Tool 实现之前，
+拒绝结果仍作为成对的 ToolResult 写入历史。
+
+`bash` 子进程使用独立环境快照：Arc Provider 的 `ARC_API_KEY / ARC_BASE_URL / ARC_MODEL` 名称
+永远移除，其他符合 `key / token / secret / password / credentials` 模式的 ambient secrets 默认也会
+移除。即使模型执行 `env`，也看不到 Arc Provider credentials。Provider 名称不能通过 Tool 环境
+allowlist 重新开启。确实需要交给 Tool 的非 Provider Secret 可以逐项使用
+`--allow-tool-env NAME`；额外黑名单使用 `--deny-tool-env NAME`。
+
+需要特别说明：Bash 可以混淆任意行为，命令文本中的 external/destructive 识别只是风险分类，不是
+shell sandbox。若不信任任意命令，应使用 `--tools read,write,edit` 或 `--tools read` 禁用 Bash。
 
 建议先使用 `--tools read`，只在可恢复的代码仓库中启用写入和 shell 工具。连接远端模型后，
 提示词、项目指令和工具读取的内容可能成为模型请求的一部分。
@@ -244,6 +315,13 @@ uv run mypy
 端到端场景通过真实 PTY 验证启动界面、动态状态、工具成功与失败、历史、会话树和 Ctrl-C 取消。
 
 ## 协议支持
+
+JSONL Runtime Event Protocol 当前版本为 `1`，每条事件都包含 `protocol_version`。固定生命周期为
+`agent_start → turn_start → message_* → tool_execution_* → turn_end → agent_end`，失败路径在
+`turn_end` 后产生 `error`，再以 `agent_end(status=error)` 收束。各事件必需字段由
+`EVENT_REQUIRED_FIELDS` 定义；新增可选字段不要求协议大版本升级。
+
+## Provider 支持
 
 当前实现支持 OpenAI Chat Completions 兼容协议，包括流式文本、function calling、
 `stream_options.include_usage` 和 `max_completion_tokens`。目前不支持 Responses、

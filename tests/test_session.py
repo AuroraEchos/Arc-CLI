@@ -10,8 +10,8 @@ from arc_cli.agent import Arc
 from arc_cli.providers import FakeProvider
 from arc_cli.runtime import ArcSession
 from arc_cli.session import SessionStore, latest_session_path, new_session_path
-from arc_cli.tools import ToolRegistry
-from arc_cli.types import Message, ProviderEvent, ToolCall, Usage
+from arc_cli.tools import Tool, ToolRegistry, ToolResult
+from arc_cli.types import Message, ProviderEvent, ToolCall, ToolSpec, Usage
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
@@ -145,6 +145,31 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(store.messages()[-1].is_error)
         self.assertEqual(store.messages()[-1].tool_call_id, "a")
         self.assertEqual(len(store.entries), 3)
+
+    async def test_tool_completion_is_saved_if_event_consumer_crashes(self):
+        store = self.store()
+
+        async def execute(args, context):
+            return ToolResult("completed")
+
+        tools = ToolRegistry([Tool(ToolSpec("work", "Work", {"type": "object"}), execute)])
+        provider = FakeProvider(
+            [
+                [
+                    ProviderEvent("tool_call", tool_call=ToolCall("done", "work", {})),
+                    ProviderEvent("done", stop_reason="tool_use"),
+                ]
+            ]
+        )
+        session = ArcSession(Arc(provider, tools, cwd=self.cwd), store)
+        with self.assertRaisesRegex(RuntimeError, "renderer crashed"):
+            async with aclosing(session.run("go")) as events:
+                async for event in events:
+                    if event.type == "tool_execution_end":
+                        raise RuntimeError("renderer crashed")
+        tool_results = [message for message in store.messages() if message.role == "tool"]
+        self.assertEqual(len(tool_results), 1)
+        self.assertEqual(tool_results[0].content, "completed")
 
     async def test_compaction_failure_preserves_history(self):
         store = self.store()

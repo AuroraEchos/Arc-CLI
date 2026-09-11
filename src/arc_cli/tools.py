@@ -5,18 +5,58 @@ from __future__ import annotations
 import asyncio
 import codecs
 import os
+import re
 import signal
 import tempfile
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from jsonschema import Draft202012Validator, ValidationError
 
-from arc_cli.types import JsonObject, ToolCall, ToolSpec
+from arc_cli.types import Effect, JsonObject, ToolCall, ToolSpec
 
 MAX_FILE_BYTES = 1024 * 1024
 MAX_OUTPUT = 24_000
+
+# Provider settings are Runtime state, never tool input. The broader pattern also
+# prevents accidentally forwarding unrelated ambient credentials by default.
+PROVIDER_ENV_NAMES = frozenset(
+    {
+        "ARC_API_KEY",
+        "ARC_BASE_URL",
+        "ARC_MODEL",
+    }
+)
+SENSITIVE_ENV_PATTERN: re.Pattern[str] = re.compile(
+    r"(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|PRIVATE_KEY)(?:$|_)",
+    flags=re.IGNORECASE,
+)
+
+
+def sanitized_subprocess_env(
+    source: Mapping[str, str] | None = None,
+    *,
+    allow_sensitive: Sequence[str] = (),
+    deny: Sequence[str] = (),
+) -> dict[str, str]:
+    """Build a subprocess environment without Runtime/provider credentials.
+
+    Non-sensitive process settings are retained so local commands continue to
+    work. Sensitive-looking names are denied unless explicitly allowlisted, but
+    Provider names remain unconditionally blocked.
+    """
+
+    source = os.environ if source is None else source
+    allowed = {name.upper() for name in allow_sensitive} - PROVIDER_ENV_NAMES
+    denied = {name.upper() for name in deny} | PROVIDER_ENV_NAMES
+    return {
+        name: value
+        for name, value in source.items()
+        if name.upper() not in denied
+        and (name.upper() in allowed or SENSITIVE_ENV_PATTERN.search(name) is None)
+    }
 
 
 @dataclass(frozen=True)
@@ -33,6 +73,8 @@ class ToolContext:
 
     cwd: Path
     emit: Callable[[str], Awaitable[None]]
+    env: Mapping[str, str] | None = None
+    env_allow_sensitive: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -41,6 +83,13 @@ class Tool:
 
     spec: ToolSpec
     execute: Callable[[JsonObject, ToolContext], Awaitable[ToolResult]]
+    effects: tuple[Effect, ...] = ("read",)
+    resolve_effects: Callable[[JsonObject], tuple[Effect, ...]] | None = None
+
+    def effects_for(self, arguments: JsonObject) -> tuple[Effect, ...]:
+        """Return the declared effects for one validated invocation."""
+
+        return self.resolve_effects(arguments) if self.resolve_effects else self.effects
 
 
 class ToolRegistry:
@@ -172,6 +221,10 @@ async def bash(arguments: JsonObject, context: ToolContext) -> ToolResult:
         "-c",
         arguments["command"],
         cwd=context.cwd,
+        env=sanitized_subprocess_env(
+            context.env,
+            allow_sensitive=context.env_allow_sensitive,
+        ),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         start_new_session=True,
@@ -221,6 +274,55 @@ async def bash(arguments: JsonObject, context: ToolContext) -> ToolResult:
     return ToolResult(result + f"\n[Exit code: {process.returncode}]", process.returncode != 0)
 
 
+def _bash_effects(arguments: JsonObject) -> tuple[Effect, ...]:
+    """Conservatively annotate common shell capabilities for policy decisions.
+
+    This is intentionally a risk classifier, not a shell sandbox. ``process``
+    remains broad authority because Bash can obscure any operation.
+    """
+
+    command = arguments["command"].lower()
+    effects: list[Effect] = ["process"]
+    external_commands = (
+        "curl",
+        "wget",
+        "ssh",
+        "scp",
+        "sftp",
+        "nc",
+        "ncat",
+        "telnet",
+        "ftp",
+        "git clone",
+        "git fetch",
+        "git pull",
+        "git push",
+        "pip install",
+        "npm install",
+        "uv add",
+    )
+    destructive_commands = (
+        "rm ",
+        "rm\t",
+        "rmdir ",
+        "unlink ",
+        "shred ",
+        "git reset --hard",
+        "git clean ",
+        "mkfs",
+        "fdisk",
+        "shutdown",
+        "reboot",
+        "drop database",
+        "drop table",
+    )
+    if any(token in command for token in external_commands):
+        effects.append("external")
+    if any(token in command for token in destructive_commands):
+        effects.append("destructive")
+    return tuple(effects)
+
+
 def create_builtin_tools() -> list[Tool]:
     """创建 Arc CLI 默认提供的 read、write、edit 和 bash 工具。"""
     path = {"type": "string", "minLength": 1}
@@ -235,6 +337,8 @@ def create_builtin_tools() -> list[Tool]:
                 "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
             },
             ["path"],
+            ("read",),
+            None,
         ),
         (
             "write",
@@ -242,6 +346,8 @@ def create_builtin_tools() -> list[Tool]:
             write,
             {"path": path, "content": {"type": "string"}},
             ["path", "content"],
+            ("write",),
+            None,
         ),
         (
             "edit",
@@ -254,6 +360,8 @@ def create_builtin_tools() -> list[Tool]:
                 "replace_all": {"type": "boolean"},
             },
             ["path", "old_text", "new_text"],
+            ("write",),
+            None,
         ),
         (
             "bash",
@@ -264,6 +372,8 @@ def create_builtin_tools() -> list[Tool]:
                 "timeout": {"type": "number", "exclusiveMinimum": 0, "maximum": 600},
             },
             ["command"],
+            ("process",),
+            _bash_effects,
         ),
     ]
     return [
@@ -279,6 +389,8 @@ def create_builtin_tools() -> list[Tool]:
                 },
             ),
             execute,
+            cast(tuple[Effect, ...], effects),
+            resolver,
         )
-        for name, description, execute, properties, required in definitions
+        for name, description, execute, properties, required, effects, resolver in definitions
     ]

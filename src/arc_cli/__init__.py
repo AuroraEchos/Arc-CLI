@@ -4,7 +4,9 @@ Arc CLI 是一个终端原生 Agent Runtime；核心运行时由 :class:`Arc` �
 """
 
 from arc_cli.agent import Arc
+from arc_cli.policy import ExecutionPolicy
+from arc_cli.profiles import Profile
 
 __version__ = "0.1.0"
 
-__all__ = ["Arc", "__version__"]
+__all__ = ["Arc", "ExecutionPolicy", "Profile", "__version__"]
