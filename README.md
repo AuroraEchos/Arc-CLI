@@ -214,6 +214,11 @@ follow-up 会在当前工具循环自然结束后进入上下文。取消或失�
 使用 `--tools none` 可以禁用全部工具。工具按模型给出的顺序执行，使
 `read → edit → bash` 的依赖和副作用顺序保持可观察。
 
+默认授权模式是 `--policy autonomous`：Arc Runtime 会自动批准模型提出并通过 Schema 校验的
+`read / write / process / external / destructive` effect，适合熟悉 Linux、希望 Agent 自主完成任务的
+本机用户。需要 effect gate 时可以使用 `--policy restricted`；此时 external 和 destructive 调用会被
+阻止。restricted 只是 Runtime 授权模式，不是操作系统沙箱。
+
 默认最多执行 20 次模型调用，每次输出上限为 4096 tokens。可以通过
 `--max-turns` 和 `--max-output-tokens` 调整。`--timeout` 控制模型网络超时；
 `bash` 工具有独立的 timeout 参数，默认 120 秒，最大 600 秒。
@@ -272,9 +277,13 @@ Arc CLI 是本机开发工具，不是操作系统沙箱。内置工具可解析
 将其视为目录隔离机制。
 
 每次工具调用遵循 `Model proposes → Arc authorizes → Tool executes`。工具声明
-`read / write / process / external / destructive` effect；默认允许前三种，后两种需要 approval handler
-或显式 `--allow-external / --allow-destructive` 预授权。Policy 拒绝发生在 Hook 和 Tool 实现之前，
-拒绝结果仍作为成对的 ToolResult 写入历史。
+`read / write / process / external / destructive` effect。默认 autonomous policy 自动批准所有已声明
+effect，同时继续生成授权审计事件；`--policy restricted` 只预授权 read、write 和 process，并阻止
+需要确认的 external/destructive 调用。Policy 拒绝发生在 Hook 和 Tool 实现之前，拒绝结果仍作为
+成对的 ToolResult 写入历史。
+
+这里的“自动批准”是用户选择的 Runtime policy，不是让模型通过自然语言授予自己权限。模型负责提出
+ToolCall，Arc 仍负责验证工具名称、JSON Schema、Provider 完整性与 Policy 决策。
 
 `bash` 子进程使用独立环境快照：Arc Provider 的 `ARC_API_KEY / ARC_BASE_URL / ARC_MODEL` 名称
 永远移除，其他符合 `key / token / secret / password / credentials` 模式的 ambient secrets 默认也会
@@ -282,11 +291,13 @@ Arc CLI 是本机开发工具，不是操作系统沙箱。内置工具可解析
 allowlist 重新开启。确实需要交给 Tool 的非 Provider Secret 可以逐项使用
 `--allow-tool-env NAME`；额外黑名单使用 `--deny-tool-env NAME`。
 
-需要特别说明：Bash 可以混淆任意行为，命令文本中的 external/destructive 识别只是风险分类，不是
-shell sandbox。若不信任任意命令，应使用 `--tools read,write,edit` 或 `--tools read` 禁用 Bash。
+需要特别说明：Bash 可以混淆任意行为，命令文本中的 external/destructive 识别只是状态标注和
+restricted mode 的风险分类，不是 shell sandbox。分类器只在命令位置识别 `ssh` 等程序，因此
+`~/.ssh/config` 这样的路径不会被误判为网络命令。若不信任任意命令，应使用
+`--tools read,write,edit` 或 `--tools read` 禁用 Bash。
 
-建议先使用 `--tools read`，只在可恢复的代码仓库中启用写入和 shell 工具。连接远端模型后，
-提示词、项目指令和工具读取的内容可能成为模型请求的一部分。
+需要更保守的运行方式时，使用 `--policy restricted --tools read`。连接远端模型后，提示词、项目指令
+和工具读取的内容可能成为模型请求的一部分。
 
 `write` 使用同目录临时文件和原子替换，`edit` 默认要求唯一精确匹配。二者都不是备份或跨文件事务。
 文件读写上限为 1 MiB，单次工具输出上限为 24,000 个字符。`bash` 会清理子进程组，

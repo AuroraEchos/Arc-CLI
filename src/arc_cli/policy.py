@@ -10,6 +10,8 @@ from arc_cli.tools import Tool, ToolContext
 from arc_cli.types import Effect, ToolCall
 
 AuthorizationStatus = Literal["allowed", "blocked", "confirmation_required"]
+ALL_EFFECTS: frozenset[Effect] = frozenset({"read", "write", "process", "external", "destructive"})
+LOCAL_EFFECTS: frozenset[Effect] = frozenset({"read", "write", "process"})
 
 
 @dataclass(frozen=True)
@@ -40,22 +42,43 @@ ApprovalHandler = Callable[[AuthorizationRequest], Awaitable[bool]]
 class ExecutionPolicy:
     """Authorize declared tool effects before an implementation is invoked.
 
-    Read, write and local process effects preserve Arc's current developer
-    workflow. External and destructive effects require explicit preauthorization
-    or an approval handler. A policy decision cannot turn Bash into a sandbox;
-    callers that do not trust arbitrary shell code should disable the Bash tool.
+    Arc defaults to autonomous authorization for experienced local users. The
+    restricted factory retains an effect gate for external and destructive
+    proposals. Neither mode turns Bash into an operating-system sandbox.
     """
 
     def __init__(
         self,
         *,
-        allowed: Iterable[Effect] = ("read", "write", "process"),
+        allowed: Iterable[Effect] = ALL_EFFECTS,
         require_confirmation: Iterable[Effect] = ("external", "destructive"),
         approval: ApprovalHandler | None = None,
     ):
         self.allowed = frozenset(allowed)
         self.require_confirmation = frozenset(require_confirmation)
         self.approval = approval
+
+    @classmethod
+    def autonomous(cls) -> ExecutionPolicy:
+        """Auto-authorize every declared effect while retaining audit events."""
+
+        return cls(allowed=ALL_EFFECTS)
+
+    @classmethod
+    def restricted(cls, *, approval: ApprovalHandler | None = None) -> ExecutionPolicy:
+        """Require approval for external and destructive effects."""
+
+        return cls(allowed=LOCAL_EFFECTS, approval=approval)
+
+    @property
+    def mode(self) -> str:
+        """Return a concise name suitable for status output."""
+
+        if self.allowed == ALL_EFFECTS:
+            return "autonomous"
+        if self.allowed == LOCAL_EFFECTS:
+            return "restricted"
+        return "custom"
 
     async def authorize(self, call: ToolCall, tool: Tool, context: ToolContext) -> AuthorizationDecision:
         """Return a decision without executing the proposed tool."""

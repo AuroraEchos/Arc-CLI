@@ -64,7 +64,8 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("› task   ↳ steer", text)
         self.assertIn("model    scripted", text)
         self.assertIn("tools    read write edit bash", text)
-        self.assertIn("effects  process read write", text)
+        self.assertIn("policy   autonomous", text)
+        self.assertIn("effects  destructive external process read write", text)
         self.assertIn("messages 1", text)
         self.assertIn("state    idle", text)
 

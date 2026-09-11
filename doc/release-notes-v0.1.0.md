@@ -6,6 +6,9 @@ Arc CLI 0.1.0 是当前 Runtime 基线的首个正式 GitHub Release。本次变
 ## Highlights
 
 - 建立 `Model proposes → Arc authorizes → Tool executes` 的 Runtime 授权链路；
+- 默认使用 autonomous policy 自动批准全部 Tool effect，适合熟悉 Linux 的本机用户；
+- 提供 `--policy restricted`，需要时可恢复 external/destructive effect gate；
+- 修复 `~/.ssh/config` 等路径被误判为正在执行 `ssh` 命令的问题；
 - Tool subprocess 默认移除 Arc Provider credentials 与常见 ambient secrets；
 - Provider 配置统一为 `ARC_MODEL`、`ARC_BASE_URL` 和 `ARC_API_KEY`；
 - 引入 Arc Core、Developer Profile、User 与 Workspace 的指令信任边界；

@@ -129,7 +129,12 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
         tools = ToolRegistry(
             [Tool(ToolSpec("dangerous", "Danger", {"type": "object"}), run_danger, ("destructive",))]
         )
-        agent = Arc(FakeProvider([call_turn(dangerous), answer()]), tools, cwd=Path.cwd())
+        agent = Arc(
+            FakeProvider([call_turn(dangerous), answer()]),
+            tools,
+            cwd=Path.cwd(),
+            policy=ExecutionPolicy.restricted(),
+        )
         events = [event async for event in agent.run("go")]
         self.assertEqual(executed, [])
         self.assertIn("Blocked by execution policy", agent.messages[2].content)
@@ -139,10 +144,17 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
         async def approve(request):
             return request.effects == ("destructive",)
 
-        policy = ExecutionPolicy(approval=approve)
+        policy = ExecutionPolicy.restricted(approval=approve)
         agent = Arc(FakeProvider([call_turn(dangerous), answer()]), tools, cwd=Path.cwd(), policy=policy)
         _ = [event async for event in agent.run("go")]
         self.assertEqual(executed, [True])
+
+        agent = Arc(FakeProvider([call_turn(dangerous), answer()]), tools, cwd=Path.cwd())
+        events = [event async for event in agent.run("go")]
+        authorization = next(e for e in events if e.type == "tool_execution_authorization")
+        self.assertEqual(authorization.data["status"], "allowed")
+        self.assertEqual(agent.policy.mode, "autonomous")
+        self.assertEqual(executed, [True, True])
 
     def test_agent_tool_environment_allow_and_deny_lists(self):
         agent = Arc(

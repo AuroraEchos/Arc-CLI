@@ -34,7 +34,7 @@ from arc_cli.runtime import ArcSession
 from arc_cli.session import SessionStore, latest_session_path, new_session_path
 from arc_cli.terminal import DIM, GREEN, RED, YELLOW, Renderer, safe_terminal
 from arc_cli.tools import ToolRegistry, create_builtin_tools
-from arc_cli.types import EVENT_PROTOCOL_VERSION, Effect, Event, Provider
+from arc_cli.types import EVENT_PROTOCOL_VERSION, Event, Provider
 
 COMMANDS = (
     "/abort",
@@ -108,12 +108,10 @@ def parser() -> argparse.ArgumentParser:
     sessions.add_argument("--no-session", action="store_true", help="keep history in memory only")
     result.add_argument("--tools", help="comma-separated allowlist, or none; defaults to profile tools")
     result.add_argument(
-        "--allow-external", action="store_true", help="preauthorize tool effects classified as external"
-    )
-    result.add_argument(
-        "--allow-destructive",
-        action="store_true",
-        help="preauthorize tool effects classified as destructive",
+        "--policy",
+        choices=("autonomous", "restricted"),
+        default="autonomous",
+        help="authorization mode; restricted is an effect gate, not an OS sandbox",
     )
     result.add_argument(
         "--allow-tool-env",
@@ -348,18 +346,14 @@ async def run(args: argparse.Namespace) -> int:
             cwd=cwd,
             profile=profile,
         )
-        allowed_effects: set[Effect] = {"read", "write", "process"}
-        if args.allow_external:
-            allowed_effects.add("external")
-        if args.allow_destructive:
-            allowed_effects.add("destructive")
+        policy = ExecutionPolicy.autonomous() if args.policy == "autonomous" else ExecutionPolicy.restricted()
         agent = Arc(
             provider,
             ToolRegistry([tool for tool in builtins if tool.spec.name in names]),
             cwd=cwd,
             system_prompt=system,
             context_prefix=(*workspace_context(workspace), *user_context(args.system)),
-            policy=ExecutionPolicy(allowed=allowed_effects),
+            policy=policy,
             tool_env_allow_sensitive=args.allow_tool_env,
             tool_env_deny=args.deny_tool_env,
             max_turns=args.max_turns,

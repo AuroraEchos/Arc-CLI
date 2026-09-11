@@ -29,8 +29,8 @@ class Profile:
 DEVELOPER_PROFILE = Profile(
     "developer",
     "Work as a software development agent. Prefer focused changes, preserve unrelated work, and verify "
-    "changes in proportion to risk. Do not perform destructive operations without explicit Runtime "
-    "authorization.",
+    "changes in proportion to risk. Propose necessary operations through tools and let Runtime policy "
+    "make the authorization decision.",
     ("read", "write", "edit", "bash"),
 )
 PROFILES = {DEVELOPER_PROFILE.name: DEVELOPER_PROFILE}

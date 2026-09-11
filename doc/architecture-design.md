@@ -296,11 +296,11 @@ ToolRegistry 在注册时检查 Schema，在执行前检查工具是否存在及
 
 | Effect | 含义 | 默认状态 |
 | --- | --- | --- |
-| `read` | 读取本地状态 | 允许 |
-| `write` | 修改本地状态 | 允许 |
-| `process` | 启动本地进程 | 允许 |
-| `external` | 访问或修改外部系统 | 需要显式授权 |
-| `destructive` | 难以恢复或有明显破坏性的操作 | 需要显式授权 |
+| `read` | 读取本地状态 | autonomous 自动批准 |
+| `write` | 修改本地状态 | autonomous 自动批准 |
+| `process` | 启动本地进程 | autonomous 自动批准 |
+| `external` | 访问或修改外部系统 | autonomous 自动批准，restricted 阻止 |
+| `destructive` | 难以恢复或有明显破坏性的操作 | autonomous 自动批准，restricted 阻止 |
 
 执行链路为：
 
@@ -321,19 +321,28 @@ Policy 位于 Hook 和 Tool 实现之前。未经授权的调用不会触发 Hoo
 
 ### 7.3 当前 CLI 授权方式
 
-ExecutionPolicy 已支持异步 approval handler，但当前 CLI 尚未连接逐次确认 UI。现阶段：
+Arc 面向熟悉 Linux 的本机用户，默认使用 `--policy autonomous`。所有已经声明且通过结构校验的
+effect 都由 Runtime 自动批准，模型可以连续完成包含网络访问或破坏性命令的任务，不需要逐次等待
+用户确认。授权事件仍然保留，便于 UI、Session 周边系统和评测器观察 Runtime 决策。
 
-- `read`、`write`、`process` 默认预授权；
-- `--allow-external` 预授权 external；
-- `--allow-destructive` 预授权 destructive；
-- 未预授权且需要确认的调用会以 `confirmation_required` 决策停止执行，并作为 blocked result 返回。
+需要更保守行为时，可以显式使用 `--policy restricted`：
 
-后续加入交互审批时，只需要在 Composition Root 注入 approval handler，无需修改 Tool 或 Agent loop。
+- read、write 和 process 仍然预授权；
+- external 与 destructive 返回 `confirmation_required`，不会执行；
+- restricted 是 effect gate，不是操作系统沙箱。
+
+ExecutionPolicy 仍支持异步 approval handler。后续加入交互审批时，只需要在 Composition Root 注入
+handler，无需修改 Tool 或 Agent loop。
+
+“自动批准”是用户启动 Arc 时选择的 Runtime policy，而不是模型通过 prompt 给自己授予权限。模型
+只能提出 ToolCall；工具存在性、参数 Schema、Provider 完整性和 Runtime policy 仍由代码校验。
 
 ### 7.4 Bash 的边界
 
-Bash 的动态 effect resolver 会识别常见网络命令和破坏性命令，但这只是保守的风险分类器，不是 shell
-解析器，更不是操作系统沙箱。命令可以通过变量、脚本、编码和间接调用隐藏实际行为。
+Bash 的动态 effect resolver 会在 shell 命令位置识别常见网络命令和破坏性命令。路径中的同名片段
+不会触发分类，例如读取 `~/.ssh/config` 只产生 process effect，而执行 `ssh host` 才产生 external。
+这仍然只是风险分类器，不是完整 shell 解析器，更不是操作系统沙箱。命令可以通过变量、脚本、编码
+和间接调用隐藏实际行为。
 
 因此 Arc 对 Bash 的正确表述是：
 
@@ -761,11 +770,12 @@ Arc 的测试优先覆盖 Runtime semantics，而不只覆盖简单工具函数�
 
 ## 20. 已知限制与权衡
 
-### 20.1 Process 默认权限较宽
+### 20.1 Autonomous 默认权限较宽
 
-Developer Profile 为保持本地开发效率，默认允许 `process`。而 Bash 本身可以表达文件、网络和破坏性
-行为，字符串 effect resolver 无法完整识别。这是当前最明显的安全—可用性权衡。更严格部署应禁用
-Bash，或将 Tool 放入独立的容器/受限执行环境。
+Developer Profile 为保持熟悉 Linux 用户的本地开发效率，默认自动批准所有 Tool effect。Bash 本身
+可以表达文件、网络和破坏性行为，命令分类无法完整识别。这是当前最明显的安全—可用性权衡。更严格
+运行应使用 `--policy restricted`，并根据需要禁用 Bash；需要真正权限隔离时，应将 Tool 放入独立的
+容器或受限执行环境。
 
 ### 20.2 Policy 与 OS Isolation 是两层能力
 

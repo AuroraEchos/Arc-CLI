@@ -553,6 +553,7 @@ class Renderer:
         self._metadata("branch", session.store.leaf[:8] if session.store.leaf else "root")
         self._metadata("messages", str(len(session.agent.messages)))
         self._metadata("tools", " ".join(session.agent.tools.names()) or "(none)")
+        self._metadata("policy", session.agent.policy.mode)
         self._metadata("effects", " ".join(sorted(session.agent.policy.allowed)) or "(none)")
         self._metadata("state", "running" if busy else self.state)
         if busy and self.turn is not None:

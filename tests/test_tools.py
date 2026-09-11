@@ -146,6 +146,21 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(result.content), MAX_OUTPUT + 100)
         self.assertEqual(len("".join(self.updates)), MAX_OUTPUT)
 
+    def test_bash_effects_distinguish_commands_from_path_names(self):
+        tool = self.registry.validate(ToolCall("effects", "bash", {"command": "true"}))
+        self.assertEqual(
+            tool.effects_for(
+                {"command": "cat ~/.ssh/config 2>/dev/null; echo marker; ls -la ~/.ssh/ 2>/dev/null"}
+            ),
+            ("process",),
+        )
+        self.assertEqual(tool.effects_for({"command": "ssh host"}), ("process", "external"))
+        self.assertEqual(
+            tool.effects_for({"command": "printf done && git fetch origin"}),
+            ("process", "external"),
+        )
+        self.assertEqual(tool.effects_for({"command": "rm obsolete.txt"}), ("process", "destructive"))
+
     async def test_timeout_kills_descendants(self):
         marker = self.cwd / "should-not-exist"
         command = f"(sleep 0.3; touch {shlex.quote(str(marker))}) & wait"

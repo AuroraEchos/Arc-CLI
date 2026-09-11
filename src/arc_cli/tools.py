@@ -281,44 +281,25 @@ def _bash_effects(arguments: JsonObject) -> tuple[Effect, ...]:
     remains broad authority because Bash can obscure any operation.
     """
 
-    command = arguments["command"].lower()
+    command = arguments["command"]
     effects: list[Effect] = ["process"]
-    external_commands = (
-        "curl",
-        "wget",
-        "ssh",
-        "scp",
-        "sftp",
-        "nc",
-        "ncat",
-        "telnet",
-        "ftp",
-        "git clone",
-        "git fetch",
-        "git pull",
-        "git push",
-        "pip install",
-        "npm install",
-        "uv add",
+    boundary = r"(?:^|[;&|()\n])\s*"
+    prefixes = r"(?:(?:sudo|command|exec|nohup)\s+)*"
+    external_patterns = (
+        boundary + prefixes + r"(?:curl|wget|ssh|scp|sftp|nc|ncat|telnet|ftp)\b",
+        boundary + prefixes + r"git\s+(?:clone|fetch|pull|push)\b",
+        boundary + prefixes + r"(?:pip[0-9.]*|python[0-9.]*\s+-m\s+pip)\s+install\b",
+        boundary + prefixes + r"npm\s+install\b",
+        boundary + prefixes + r"uv\s+add\b",
     )
-    destructive_commands = (
-        "rm ",
-        "rm\t",
-        "rmdir ",
-        "unlink ",
-        "shred ",
-        "git reset --hard",
-        "git clean ",
-        "mkfs",
-        "fdisk",
-        "shutdown",
-        "reboot",
-        "drop database",
-        "drop table",
+    destructive_patterns = (
+        boundary + prefixes + r"(?:rm|rmdir|unlink|shred|mkfs(?:\.[a-z0-9]+)?|fdisk|shutdown|reboot)\b",
+        boundary + prefixes + r"git\s+(?:reset\s+--hard|clean\b)",
+        r"\bdrop\s+(?:database|table)\b",
     )
-    if any(token in command for token in external_commands):
+    if any(re.search(pattern, command, re.IGNORECASE) for pattern in external_patterns):
         effects.append("external")
-    if any(token in command for token in destructive_commands):
+    if any(re.search(pattern, command, re.IGNORECASE) for pattern in destructive_patterns):
         effects.append("destructive")
     return tuple(effects)
 
