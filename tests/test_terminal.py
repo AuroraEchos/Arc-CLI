@@ -60,10 +60,10 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         renderer.show_status(session, busy=False)
 
         text = output.getvalue()
-        self.assertIn("ARC 0.1.0 · scripted", text)
+        self.assertIn("ARC 0.1.1 · scripted", text)
         self.assertIn("› task   ↳ steer", text)
         self.assertIn("model    scripted", text)
-        self.assertIn("tools    read write edit bash", text)
+        self.assertIn("tools    read write edit apply_patch bash", text)
         self.assertIn("policy   autonomous", text)
         self.assertIn("effects  destructive external process read write", text)
         self.assertIn("messages 1", text)
@@ -238,6 +238,36 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("more available from line 3", text)
         self.assertIn("old_text not found", text)
         self.assertIn("✗ edit", text)
+
+    def test_apply_patch_summary_hides_full_arguments(self) -> None:
+        output = io.StringIO()
+        renderer = Renderer("text", stdout=output, stderr=output)
+        renderer.emit(
+            Event(
+                "tool_execution_start",
+                {
+                    "tool_call": {
+                        "id": "p",
+                        "name": "apply_patch",
+                        "arguments": {
+                            "operations": [
+                                {"type": "add", "path": "new.py", "content": "secret payload"},
+                                {"type": "update", "path": "old.py", "edits": []},
+                            ]
+                        },
+                    }
+                },
+            )
+        )
+        renderer.emit(
+            Event(
+                "tool_execution_end",
+                {"call_id": "p", "content": "Applied 2 file operations", "is_error": False},
+            )
+        )
+        text = output.getvalue()
+        self.assertIn("✓ apply_patch · 2 file operations · 1 add, 1 update", text)
+        self.assertNotIn("secret payload", text)
 
     def test_history_summarizes_tool_payloads(self) -> None:
         output = io.StringIO()

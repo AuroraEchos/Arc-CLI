@@ -11,7 +11,7 @@ import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -178,6 +178,134 @@ def _atomic_write(path: Path, content: str) -> None:
             Path(temporary).unlink(missing_ok=True)
 
 
+PatchAction = Literal["add", "update", "delete"]
+
+
+@dataclass(frozen=True)
+class _PreparedPatch:
+    """One validated file transition ready to commit."""
+
+    action: PatchAction
+    path: Path
+    original: str | None
+    updated: str | None
+    permissions: int | None
+    edit_count: int = 0
+
+
+def _validate_write_size(content: str) -> None:
+    if len(content.encode("utf-8")) > MAX_FILE_BYTES:
+        raise ValueError("Patch result exceeds 1 MiB")
+
+
+def _prepare_patch(arguments: JsonObject, context: ToolContext) -> list[_PreparedPatch]:
+    """Validate every patch operation and calculate results without changing disk state."""
+
+    prepared: list[_PreparedPatch] = []
+    seen: set[Path] = set()
+    for operation in cast(list[JsonObject], arguments["operations"]):
+        action = cast(PatchAction, operation["type"])
+        path = _path(context, operation["path"])
+        if path in seen:
+            raise ValueError(f"Duplicate patch path: {path}")
+        seen.add(path)
+
+        if action == "add":
+            if path.exists():
+                raise ValueError(f"Cannot add existing path: {path}")
+            content = cast(str, operation["content"])
+            _validate_write_size(content)
+            prepared.append(_PreparedPatch(action, path, None, content, None))
+            continue
+
+        if not path.is_file():
+            raise ValueError(f"Patch target is not a file: {path}")
+        original = _read_text(path)
+        permissions = path.stat().st_mode & 0o777
+        if action == "delete":
+            prepared.append(_PreparedPatch(action, path, original, None, permissions))
+            continue
+
+        updated = original
+        edits = cast(list[JsonObject], operation["edits"])
+        for index, replacement in enumerate(edits, 1):
+            old_text = cast(str, replacement["old_text"])
+            count = updated.count(old_text)
+            if count == 0:
+                raise ValueError(f"Update {path} edit {index}: old_text not found")
+            if count > 1:
+                raise ValueError(f"Update {path} edit {index}: old_text matches {count} times")
+            updated = updated.replace(old_text, cast(str, replacement["new_text"]), 1)
+        if updated == original:
+            raise ValueError(f"Update does not change file: {path}")
+        _validate_write_size(updated)
+        prepared.append(_PreparedPatch(action, path, original, updated, permissions, len(edits)))
+    return prepared
+
+
+def _assert_patch_precondition(change: _PreparedPatch) -> None:
+    """Refuse to overwrite a target that changed after preflight validation."""
+
+    if change.original is None:
+        if change.path.exists():
+            raise ValueError(f"Patch target appeared after validation: {change.path}")
+        return
+    if not change.path.is_file() or _read_text(change.path) != change.original:
+        raise ValueError(f"Patch target changed after validation: {change.path}")
+
+
+def _commit_patch(change: _PreparedPatch) -> None:
+    _assert_patch_precondition(change)
+    if change.updated is None:
+        change.path.unlink()
+    else:
+        _atomic_write(change.path, change.updated)
+
+
+def _rollback_patch(change: _PreparedPatch) -> None:
+    if change.original is None:
+        change.path.unlink(missing_ok=True)
+    else:
+        _atomic_write(change.path, change.original)
+        if change.permissions is not None:
+            change.path.chmod(change.permissions)
+
+
+async def apply_patch(arguments: JsonObject, context: ToolContext) -> ToolResult:
+    """Apply a prevalidated multi-file text patch with best-effort rollback."""
+
+    prepared = _prepare_patch(arguments, context)
+    committed: list[_PreparedPatch] = []
+    try:
+        for change in prepared:
+            _commit_patch(change)
+            committed.append(change)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for change in reversed(committed):
+            try:
+                _rollback_patch(change)
+            except Exception as rollback_error:
+                rollback_errors.append(f"{change.path}: {rollback_error}")
+        if rollback_errors:
+            details = "; ".join(rollback_errors)
+            raise RuntimeError(f"Patch failed ({exc}); rollback also failed: {details}") from exc
+        raise
+
+    summaries = []
+    for change in prepared:
+        detail = f" ({change.edit_count} edits)" if change.action == "update" else ""
+        summaries.append(f"- {change.action} {change.path}{detail}")
+    return ToolResult(f"Applied {len(prepared)} file operations:\n" + "\n".join(summaries))
+
+
+def _apply_patch_effects(arguments: JsonObject) -> tuple[Effect, ...]:
+    operations = cast(list[JsonObject], arguments["operations"])
+    if any(operation["type"] == "delete" for operation in operations):
+        return ("write", "destructive")
+    return ("write",)
+
+
 async def read(arguments: JsonObject, context: ToolContext) -> ToolResult:
     """读取 UTF-8 文件，并返回指定范围内带行号的文本。"""
     lines = _read_text(_path(context, arguments["path"])).splitlines()
@@ -305,8 +433,51 @@ def _bash_effects(arguments: JsonObject) -> tuple[Effect, ...]:
 
 
 def create_builtin_tools() -> list[Tool]:
-    """创建 Arc CLI 默认提供的 read、write、edit 和 bash 工具。"""
+    """创建 Arc CLI 默认提供的文件与 shell 工具。"""
     path = {"type": "string", "minLength": 1}
+    patch_operation = {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "add"},
+                    "path": path,
+                    "content": {"type": "string", "maxLength": MAX_FILE_BYTES},
+                },
+                "required": ["type", "path", "content"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "update"},
+                    "path": path,
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {"type": "string", "minLength": 1},
+                                "new_text": {"type": "string", "maxLength": MAX_FILE_BYTES},
+                            },
+                            "required": ["old_text", "new_text"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["type", "path", "edits"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"type": {"const": "delete"}, "path": path},
+                "required": ["type", "path"],
+                "additionalProperties": False,
+            },
+        ]
+    }
     definitions = [
         (
             "read",
@@ -343,6 +514,22 @@ def create_builtin_tools() -> list[Tool]:
             ["path", "old_text", "new_text"],
             ("write",),
             None,
+        ),
+        (
+            "apply_patch",
+            "Apply validated add, update, and delete operations across UTF-8 text files as one patch.",
+            apply_patch,
+            {
+                "operations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": patch_operation,
+                }
+            },
+            ["operations"],
+            ("write",),
+            _apply_patch_effects,
         ),
         (
             "bash",

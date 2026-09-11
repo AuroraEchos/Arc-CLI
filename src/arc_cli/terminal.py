@@ -494,6 +494,9 @@ class Renderer:
             value = snapshot.arguments.get("command", "command")
         elif snapshot.name in ("read", "write", "edit"):
             value = snapshot.arguments.get("path", "file")
+        elif snapshot.name == "apply_patch":
+            operations = snapshot.arguments.get("operations", [])
+            value = f"{len(operations)} file operations"
         else:
             value = json.dumps(snapshot.arguments, ensure_ascii=False, sort_keys=True)
         return _one_line(value, width)
@@ -512,6 +515,16 @@ class Renderer:
             return ["; ".join(read_detail)]
         if snapshot.name in ("write", "edit"):
             return ["file updated"] if not snapshot.is_error else [_one_line(content, width)]
+        if snapshot.name == "apply_patch":
+            if snapshot.is_error:
+                return [_one_line(content, width)]
+            operations = snapshot.arguments.get("operations", [])
+            action_counts = {
+                action: sum(operation.get("type") == action for operation in operations)
+                for action in ("add", "update", "delete")
+            }
+            summary = ", ".join(f"{count} {action}" for action, count in action_counts.items() if count)
+            return [summary or "patch applied"]
         lines = [line for line in content.splitlines() if line.strip()]
         exit_line = next((line for line in reversed(lines) if line.startswith("[Exit code:")), None)
         payload = [line for line in lines if not line.startswith("[Exit code:")]

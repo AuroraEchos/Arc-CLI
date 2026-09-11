@@ -6,7 +6,10 @@ import shlex
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import arc_cli.tools as tools_module
+from arc_cli.policy import ExecutionPolicy
 from arc_cli.tools import (
     MAX_OUTPUT,
     ToolContext,
@@ -53,6 +56,134 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path.read_bytes(), b"b\r\nb\r\n")
         self.assertEqual(path.stat().st_mode & 0o777, 0o640)
 
+    async def test_apply_patch_adds_updates_and_deletes_multiple_files(self):
+        source = self.cwd / "source.py"
+        source.write_text("alpha\nbeta\n")
+        source.chmod(0o640)
+        obsolete = self.cwd / "obsolete.py"
+        obsolete.write_text("remove me\n")
+
+        result = await self.execute(
+            "apply_patch",
+            operations=[
+                {"type": "add", "path": "new.py", "content": "created\n"},
+                {
+                    "type": "update",
+                    "path": "source.py",
+                    "edits": [
+                        {"old_text": "alpha", "new_text": "first"},
+                        {"old_text": "beta", "new_text": "second"},
+                    ],
+                },
+                {"type": "delete", "path": "obsolete.py"},
+            ],
+        )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual((self.cwd / "new.py").read_text(), "created\n")
+        self.assertEqual(source.read_text(), "first\nsecond\n")
+        self.assertEqual(source.stat().st_mode & 0o777, 0o640)
+        self.assertFalse(obsolete.exists())
+        self.assertIn("Applied 3 file operations", result.content)
+
+    async def test_apply_patch_preflight_failure_changes_nothing(self):
+        source = self.cwd / "source.py"
+        source.write_text("original\n")
+
+        result = await self.execute(
+            "apply_patch",
+            operations=[
+                {"type": "add", "path": "new.py", "content": "created\n"},
+                {
+                    "type": "update",
+                    "path": "source.py",
+                    "edits": [{"old_text": "missing", "new_text": "replacement"}],
+                },
+            ],
+        )
+
+        self.assertTrue(result.is_error)
+        self.assertFalse((self.cwd / "new.py").exists())
+        self.assertEqual(source.read_text(), "original\n")
+
+    async def test_apply_patch_rejects_duplicate_and_ambiguous_targets(self):
+        source = self.cwd / "source.py"
+        source.write_text("same same\n")
+        duplicate = await self.execute(
+            "apply_patch",
+            operations=[
+                {"type": "delete", "path": "source.py"},
+                {"type": "add", "path": "source.py", "content": "replacement\n"},
+            ],
+        )
+        ambiguous = await self.execute(
+            "apply_patch",
+            operations=[
+                {
+                    "type": "update",
+                    "path": "source.py",
+                    "edits": [{"old_text": "same", "new_text": "changed"}],
+                }
+            ],
+        )
+
+        self.assertTrue(duplicate.is_error)
+        self.assertTrue(ambiguous.is_error)
+        self.assertEqual(source.read_text(), "same same\n")
+
+    async def test_apply_patch_rolls_back_after_commit_failure(self):
+        source = self.cwd / "source.py"
+        source.write_text("original\n")
+        real_atomic_write = tools_module._atomic_write
+        calls = 0
+
+        def fail_second_write(path, content):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("simulated write failure")
+            real_atomic_write(path, content)
+
+        with patch("arc_cli.tools._atomic_write", side_effect=fail_second_write):
+            result = await self.execute(
+                "apply_patch",
+                operations=[
+                    {"type": "add", "path": "new.py", "content": "created\n"},
+                    {
+                        "type": "update",
+                        "path": "source.py",
+                        "edits": [{"old_text": "original", "new_text": "updated"}],
+                    },
+                ],
+            )
+
+        self.assertTrue(result.is_error)
+        self.assertFalse((self.cwd / "new.py").exists())
+        self.assertEqual(source.read_text(), "original\n")
+
+    def test_apply_patch_effects_include_destructive_for_delete(self):
+        tool = self.registry.validate(
+            ToolCall(
+                "effects",
+                "apply_patch",
+                {"operations": [{"type": "add", "path": "new.py", "content": "new"}]},
+            )
+        )
+        self.assertEqual(tool.effects_for({"operations": [{"type": "add"}]}), ("write",))
+        self.assertEqual(tool.effects_for({"operations": [{"type": "delete"}]}), ("write", "destructive"))
+
+    async def test_apply_patch_delete_requires_authorization_in_restricted_mode(self):
+        call = ToolCall(
+            "delete",
+            "apply_patch",
+            {"operations": [{"type": "delete", "path": "obsolete.py"}]},
+        )
+        tool = self.registry.validate(call)
+        decision = await ExecutionPolicy.restricted().authorize(call, tool, self.context)
+
+        self.assertEqual(decision.status, "confirmation_required")
+        self.assertEqual(decision.effects, ("write", "destructive"))
+
     async def test_schema_validation(self):
         for name, args in [
             ("read", {"path": "a", "offset": 0}),
@@ -60,6 +191,19 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
             ("write", {"path": "a"}),
             ("bash", {"command": "true", "timeout": 0}),
             ("edit", {"path": "a", "old_text": "", "new_text": "b"}),
+            ("apply_patch", {"operations": []}),
+            (
+                "apply_patch",
+                {
+                    "operations": [
+                        {
+                            "type": "update",
+                            "path": "a",
+                            "edits": [{"old_text": "", "new_text": "b"}],
+                        }
+                    ]
+                },
+            ),
             ("unknown", {}),
         ]:
             with self.subTest(name=name, args=args):

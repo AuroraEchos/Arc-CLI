@@ -215,7 +215,7 @@ class TerminalE2ETests(unittest.TestCase):
             terminal.wait_for("idle")
 
         output, server = self.run_scenario([text_response("PTY ready")], action)
-        self.assertIn("ARC 0.1.0", output)
+        self.assertIn("ARC 0.1.1", output)
         self.assertIn("↳ steer", output)
         self.assertIn("arc-pty-model", output)
         self.assertIn("thinking", output)

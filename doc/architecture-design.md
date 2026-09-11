@@ -1,8 +1,8 @@
 # Arc 架构设计报告
 
-> 文档状态：当前架构基线  
-> 对应版本：Arc CLI 0.1.0  
-> 更新日期：2026-09-11  
+> 文档状态：当前架构基线
+> 对应版本：Arc CLI 0.1.1
+> 更新日期：2026-09-12
 > 目标读者：Arc 维护者、Profile/Tool/Provider 开发者、终端与 Runtime 集成方
 
 ## 1. 摘要
@@ -244,9 +244,9 @@ Arc Core 只规定跨场景成立的 Runtime 行为，例如：
 - Workspace 和 Tool Output 是低信任数据；
 - 修改前检查状态，失败时如实报告。
 
-Developer Profile 再添加软件工程行为与默认工具：`read`、`write`、`edit`、`bash`。因此“会写代码”
-是一个 Profile 属性，不是 Arc loop 的固有定义。未来 Research、Browser 或 Phone Profile 应通过新增
-Profile 与 Tool 组合实现，而不是复制或分叉核心循环。
+Developer Profile 再添加软件工程行为与默认工具：`read`、`write`、`edit`、`apply_patch`、`bash`。
+因此“会写代码”是一个 Profile 属性，不是 Arc loop 的固有定义。未来 Research、Browser 或 Phone
+Profile 应通过新增 Profile 与 Tool 组合实现，而不是复制或分叉核心循环。
 
 ### 6.2 指令层级
 

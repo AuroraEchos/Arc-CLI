@@ -23,8 +23,8 @@
 
 Arc CLI 是一个终端原生 Agent Runtime，支持可分支会话、显式上下文投影与可校验工具执行。
 
-当前正式发布版本为 **v0.1.0**。本轮 Runtime、安全边界与终端体验改进继续作为 0.1.0 的稳定修复
-发布，暂不启用新的次版本号。
+当前正式发布版本为 **v0.1.1**。本版本增加结构化 `apply_patch` Tool，并继续加固配置、Session 与
+Runtime 边界。
 
 Arc 是运行在 Arc CLI 中的助手。它根据当前请求判断是否需要工具，按顺序执行模型请求的工具，
 将可验证的工具结果写回历史，并继续推理，直到任务完成、被取消或达到轮次上限。
@@ -38,6 +38,7 @@ Arc 是运行在 Arc CLI 中的助手。它根据当前请求判断是否需要�
 - **可分支会话**：会话以追加式 JSONL 树保存，可切换历史节点并从任意节点继续。
 - **显式上下文投影**：持久化历史与发送给模型的上下文分离，可过滤本地消息并手动压缩。
 - **可校验工具执行**：工具参数使用 JSON Schema 校验，工具结果和错误都会进入消息历史。
+- **结构化补丁**：`apply_patch` 可预检跨文件 add/update/delete，并在提交失败时回滚已应用变更。
 - **流式运行时**：统一输出模型文本、工具进度、工具结果、错误和生命周期事件。
 - **安静的过程可见性**：单行状态动画与工具摘要让过程可见，但不会用原始输出刷屏。
 - **可靠取消**：取消 shell 工具时清理整个进程组，并为未完成的工具调用补充明确结果。
@@ -60,19 +61,19 @@ Arc 目前发布为 GitHub Release 中的 Python wheel。使用 [uv](https://doc
 `arc` 安装为隔离的全局命令：
 
 ```bash
-uv tool install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.0/arc_cli-0.1.0-py3-none-any.whl"
+uv tool install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.1/arc_cli-0.1.1-py3-none-any.whl"
 arc --version
 ```
 
 也可以使用 pipx：
 
 ```bash
-pipx install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.0/arc_cli-0.1.0-py3-none-any.whl"
+pipx install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.1/arc_cli-0.1.1-py3-none-any.whl"
 arc --version
 ```
 
-升级或重新安装同一个 `0.1.0` 修复版本时，可以分别使用 `uv tool install --force URL` 或
-`pipx install --force URL`。Release 同时提供源码包，适合需要自行构建的用户。
+从旧版本升级时，可以分别使用 `uv tool install --force URL` 或 `pipx install --force URL`。
+Release 同时提供源码包，适合需要自行构建的用户。
 
 ### 从源码开发
 
@@ -153,7 +154,7 @@ arc --tools read -p "阅读 README.md 并解释项目架构"
 允许 Arc 修改项目并执行命令：
 
 ```bash
-arc --tools read,write,edit,bash -p "为这个项目实现一个小功能"
+arc --tools read,write,edit,apply_patch,bash -p "为这个项目实现一个小功能"
 ```
 
 其他常用方式：
@@ -225,9 +226,14 @@ follow-up 会在当前工具循环自然结束后进入上下文。取消或失�
 
 ## 命令行约定
 
-默认启用 `read,write,edit,bash`。使用 `--tools read` 可以限制为只读工具，
+默认启用 `read,write,edit,apply_patch,bash`。使用 `--tools read` 可以限制为只读工具，
 使用 `--tools none` 可以禁用全部工具。工具按模型给出的顺序执行，使
-`read → edit → bash` 的依赖和副作用顺序保持可观察。
+`read → apply_patch → bash` 的依赖和副作用顺序保持可观察。
+
+`apply_patch` 接收结构化 operations，可在一次调用中新增、更新或删除多个 UTF-8 文本文件。Arc 会
+先验证全部路径、文件状态和精确文本匹配，再开始提交；若提交过程中出现错误，会尽力按逆序恢复已经
+应用的变更。包含 delete 时，工具声明 `write + destructive` effect，因此 restricted policy 会要求
+明确授权。
 
 默认授权模式是 `--policy autonomous`：Arc Runtime 会自动批准模型提出并通过 Schema 校验的
 `read / write / process / external / destructive` effect，适合熟悉 Linux、希望 Agent 自主完成任务的
