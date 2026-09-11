@@ -111,6 +111,19 @@ base_url = "https://api.example.com/v1"
 `api_key` 明确禁止写入 TOML；Secret 只从 `ARC_API_KEY` 或项目 `.env` 读取。
 `.env` 已被 Git 忽略，不应提交。
 
+跨项目生效的个人偏好可以写入 `$XDG_CONFIG_HOME/arc/AGENTS.md`；未设置
+`XDG_CONFIG_HOME` 时路径为 `~/.config/arc/AGENTS.md`。例如：
+
+```markdown
+# My preferences
+
+- Keep explanations concise.
+- Prefer small, reviewable changes.
+```
+
+项目自身的技术栈、构建和测试约定则放在项目根目录的 `AGENTS.md`。两类文件均为可选配置，
+每个文件上限 32 KiB。
+
 如果不使用 uv，也可以安装为普通 Python 项目：
 
 ```bash
@@ -267,9 +280,14 @@ follow-up 会在当前工具循环自然结束后进入上下文。取消或失�
 会话文件可能记录提示词、模型回复、源码、工具参数和工具结果。新建文件权限为 `0600`，
 并使用排他锁限制为单写入者。不要上传或提交包含敏感数据的会话文件。
 
-Arc CLI 优先支持工作目录中的 `ARC.md`；Developer Profile 同时兼容 `AGENTS.md`，每个文件上限
-32 KiB；使用 `--no-context` 可以禁用。两者都以非持久化、非 system 的低信任 Workspace Context
-发送，不能改变 Runtime Policy。`/compact` 会调用模型并可能产生费用。
+Arc 的指令按 `Core Policy > Profile > 用户偏好 > 项目约定` 分层。Core Policy 与 Profile 随框架
+发布，不从当前工作目录发现；`ARC.md` 记录 Arc Runtime 自身的不变量，不是任意项目的用户配置入口。
+用户全局偏好从 `$XDG_CONFIG_HOME/arc/AGENTS.md`（默认 `~/.config/arc/AGENTS.md`）加载，项目约定仅在
+工作目录的 `AGENTS.md` 存在时加载，不依赖所选 Profile，也不会对文件内容或项目技术栈作假设。
+
+用户与项目文件都以非持久化、非 system 的上下文发送，不能改变 Runtime Policy；项目层额外标记为
+untrusted。`--instructions` 可添加仅本次运行生效的用户指令；`--system` 保留为兼容别名。
+`--no-context` 只禁用项目 `AGENTS.md`，不会关闭用户全局偏好。`/compact` 会调用模型并可能产生费用。
 
 ## 安全边界
 

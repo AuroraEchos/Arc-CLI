@@ -25,6 +25,8 @@ from arc_cli.profiles import (
     PROFILES,
     build_system_prompt,
     get_profile,
+    global_user_context,
+    load_user_instructions,
     load_workspace_instructions,
     user_context,
     workspace_context,
@@ -130,8 +132,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--max-turns", type=int, default=20)
     result.add_argument("--max-output-tokens", type=int, default=4096)
     result.add_argument("--timeout", type=float, default=60, help="model network timeout in seconds")
-    result.add_argument("--system", default="", help="additional system instructions")
-    result.add_argument("--no-context", action="store_true", help="do not read workspace ARC.md/AGENTS.md")
+    result.add_argument(
+        "--instructions",
+        "--system",
+        dest="instructions",
+        default="",
+        help="additional user instructions for this run (--system is a compatibility alias)",
+    )
+    result.add_argument("--no-context", action="store_true", help="do not read workspace AGENTS.md")
     result.add_argument("--no-color", action="store_true", help="disable ANSI colors")
     result.add_argument("--no-markdown", action="store_true", help="show raw Markdown in interactive mode")
     result.add_argument("--version", action="version", version=f"Arc CLI {__version__}")
@@ -341,7 +349,8 @@ async def run(args: argparse.Namespace) -> int:
         )
         if store is None:
             store = SessionStore.create(cwd, None if args.no_session else (path or new_session_path(cwd)))
-        workspace = load_workspace_instructions(cwd, profile=profile, enabled=not args.no_context)
+        user_preferences = load_user_instructions()
+        workspace = load_workspace_instructions(cwd, enabled=not args.no_context)
         system = build_system_prompt(
             cwd=cwd,
             profile=profile,
@@ -352,7 +361,11 @@ async def run(args: argparse.Namespace) -> int:
             ToolRegistry([tool for tool in builtins if tool.spec.name in names]),
             cwd=cwd,
             system_prompt=system,
-            context_prefix=(*workspace_context(workspace), *user_context(args.system)),
+            context_prefix=(
+                *global_user_context(user_preferences),
+                *user_context(args.instructions),
+                *workspace_context(workspace),
+            ),
             policy=policy,
             tool_env_allow_sensitive=args.allow_tool_env,
             tool_env_deny=args.deny_tool_env,

@@ -256,25 +256,35 @@ Arc 使用结构化投影表达信任等级：
 | --- | --- | --- | --- |
 | 1 | Core Policy | system prompt | 不可由工作区覆盖的 Runtime 原则 |
 | 2 | Profile + Runtime Context | system prompt | 当前 Agent 行为和运行目录 |
-| 3 | User Instruction | 非持久化 user context | 用户对本次组装的附加要求 |
-| 4 | `ARC.md` / `AGENTS.md` | 标注 untrusted 的 user context | 项目工作方式，不授予权限 |
+| 3 | 用户全局偏好 + 单次 User Instruction | 非持久化 user context | 用户跨项目偏好与本次附加要求 |
+| 4 | 项目根目录 `AGENTS.md` | 标注 untrusted 的 user context | 项目工作方式，不授予权限 |
 | 5 | 项目文件和 Tool Output | 普通上下文数据 | 可能包含提示注入，不能改变 Policy |
 
 这不是仅靠排序实现的安全边界。真正的副作用权限由代码中的 ExecutionPolicy 决定；即使低信任内容
 成功诱导模型提出危险 ToolCall，Runtime 仍然可以阻止它。
 
-### 6.3 `ARC.md` 与 `AGENTS.md`
+### 6.3 Core、用户与项目文件
 
-`ARC.md` 是 Arc 原生的 Workspace Instruction 文件。Developer Profile 继续读取 `AGENTS.md` 作为
-开发者生态兼容层。每个文件上限为 32 KiB，并以明确的 untrusted 标签投影到模型上下文；它们不会
-写入 system prompt，也不会自动进入持久化 Session。
+根目录 `ARC.md` 记录 Arc Runtime 自身的架构约束和运行时不变量。它属于 Arc 源码项目的框架文档，
+其必要约束由随包发布的 Core Policy 表达；Runtime 不会把任意工作目录中的同名文件动态提升为框架
+指令，也不会把 Arc 源码仓库的 `ARC.md` 注入其他项目。
 
-这种设计允许 Workspace 说明“如何构建、测试、命名和组织项目”，但不允许它：
+跨项目的个人偏好从 `$XDG_CONFIG_HOME/arc/AGENTS.md` 加载，未设置 XDG 路径时使用
+`~/.config/arc/AGENTS.md`。当前工作目录根部的 `AGENTS.md` 则纯粹表示该项目的约定，遵循
+load-if-present，不依赖 Developer 或其他 Profile，框架不假设其语言、工具链或内容。每个文件上限
+32 KiB，且都作为非持久化 user context；项目文件额外使用明确的 untrusted 标签。
+
+这种设计允许用户表达跨项目偏好，也允许 Workspace 说明“如何构建、测试、命名和组织项目”，但
+不允许低层指令：
 
 - 放宽 Tool Policy；
 - 索取 Arc Provider credentials；
 - 将自身提升为 Core Policy；
 - 声称某个外部或破坏性动作已经得到授权。
+
+Arc 仓库自身的 Python、MyPy、Ruff 和测试约定位于 `CONTRIBUTING.md`，不会通过工作区指令发现机制
+隐式传播。发生冲突时采用 `Core Policy > Profile > 用户偏好 > 项目约定`，但真正的副作用权限仍只由
+ExecutionPolicy 决定。
 
 ## 7. Tool 与 ExecutionPolicy
 

@@ -11,8 +11,9 @@ Arc CLI 0.1.0 是当前 Runtime 基线的首个正式 GitHub Release。本次变
 - 修复 `~/.ssh/config` 等路径被误判为正在执行 `ssh` 命令的问题；
 - Tool subprocess 默认移除 Arc Provider credentials 与常见 ambient secrets；
 - Provider 配置统一为 `ARC_MODEL`、`ARC_BASE_URL` 和 `ARC_API_KEY`；
-- 引入 Arc Core、Developer Profile、User 与 Workspace 的指令信任边界；
-- 支持 `ARC.md`，并保留 Developer Profile 对 `AGENTS.md` 的支持；
+- 明确 Arc Core、Profile、用户全局偏好与项目 Workspace 的指令信任边界；
+- 用户偏好支持 `$XDG_CONFIG_HOME/arc/AGENTS.md`，项目 `AGENTS.md` 按存在性加载且不依赖 Profile；
+- `ARC.md` 仅记录 Arc Runtime 自身不变量，不再作为任意工作区的动态指令入口；
 - 稳定 Runtime Event Protocol v1 及 Agent/Turn/Message/Tool 生命周期；
 - 加固 Session reopen、branch、checkpoint、取消和 incomplete tool-call recovery；
 - 改进终端 streaming、steering prompt、tool status 和常用 Markdown 渲染；

@@ -41,7 +41,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("--no-color", self.cli("--help").stdout)
         self.assertIn("--no-markdown", self.cli("--help").stdout)
         self.assertIn("--policy {autonomous,restricted}", self.cli("--help").stdout)
+        self.assertIn("--instructions", self.cli("--help").stdout)
         self.assertNotIn("--allow-external", self.cli("--help").stdout)
+
+    def test_system_remains_an_alias_for_run_instructions(self):
+        self.assertEqual(parser().parse_args(["--system", "legacy"]).instructions, "legacy")
+        self.assertEqual(parser().parse_args(["--instructions", "current"]).instructions, "current")
 
     def test_default_prompt_is_a_general_assistant_with_discretionary_tools(self):
         prompt = DEFAULT_SYSTEM_PROMPT.lower()

@@ -1,4 +1,7 @@
-# Developer Profile Instructions
+# Contributing to Arc CLI
+
+These rules describe development of the Arc repository. They are contributor documentation, not runtime
+instructions loaded into unrelated user projects.
 
 ## Working agreement
 
@@ -6,7 +9,8 @@
 - Prefer focused, readable modules and standard-library solutions. Add dependencies only when they create a
   clear boundary or remove substantial complexity.
 - Preserve unrelated working-tree changes. Do not inspect, print, commit, or overwrite `.env` secrets.
-- Use `apply_patch` for source and documentation edits. Keep user-facing CLI text in English.
+- Use `apply_patch` for source and documentation edits.
+- Keep user-facing CLI text in English.
 - Do not describe Bash risk classification as an operating-system sandbox.
 
 ## Repository map

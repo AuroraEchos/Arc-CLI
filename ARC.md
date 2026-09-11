@@ -1,4 +1,7 @@
-# Arc Runtime Project Instructions
+# Arc Runtime Invariants
+
+This file documents framework invariants for Arc itself. Arc does not discover an `ARC.md` from an
+arbitrary working directory; user projects opt into project guidance with `AGENTS.md` instead.
 
 ## Purpose
 
