@@ -222,12 +222,19 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_message_validation(self):
-        message = Message("assistant", "hi", (ToolCall("a", "read", {"path": "x"}),), usage=Usage(1, 2))
+        message = Message(
+            "assistant",
+            "hi",
+            (ToolCall("a", "read", {"path": "x"}),),
+            usage=Usage(1, 2),
+            reasoning_content="inspect x",
+        )
         self.assertEqual(Message.from_dict(json.loads(json.dumps(message.to_dict()))), message)
         for data in (
             {"role": "invalid"},
             {"role": "user", "content": 123},
             {"role": "user", "usage": {"input_tokens": True}},
+            {"role": "assistant", "reasoning_content": 123},
         ):
             with self.assertRaises(ValueError):
                 Message.from_dict(data)

@@ -82,6 +82,28 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
         prompts = [request.system_prompt for request in agent.provider.requests]
         self.assertEqual(prompts, ["rendered first", "rendered second"])
 
+    async def test_reasoning_content_is_preserved_for_tool_call_round_trip(self):
+        agent = self.agent(
+            [
+                [
+                    ProviderEvent("reasoning_delta", text="inspect state"),
+                    ProviderEvent("tool_call", tool_call=self.call),
+                    ProviderEvent("done", stop_reason="tool_use"),
+                ],
+                answer(),
+            ]
+        )
+        events = [event async for event in agent.run("go")]
+        self.assertFalse(
+            any(
+                event.type == "message_update"
+                for event in events
+                if event.data.get("delta") == "inspect state"
+            )
+        )
+        self.assertEqual(agent.messages[1].reasoning_content, "inspect state")
+        self.assertEqual(agent.provider.requests[1].messages[1].reasoning_content, "inspect state")
+
     async def test_static_system_prompt_is_reused(self):
         agent = self.agent([answer()], system_prompt="fixed")
         _ = [event async for event in agent.run("go")]
@@ -267,6 +289,25 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(types.index("turn_end"), types.index("error"))
         self.assertLess(types.index("error"), types.index("agent_end"))
         self.assertEqual(next(e for e in events if e.type == "turn_end").data["stop_reason"], "error")
+
+    async def test_provider_terminal_stop_reasons_are_reported_without_running_tools(self):
+        for reason, status in (
+            ("content_filter", "error"),
+            ("insufficient_system_resource", "error"),
+            ("aborted", "aborted"),
+        ):
+            with self.subTest(reason=reason):
+                self.executed.clear()
+                agent = self.agent([call_turn(self.call, reason=reason)])
+                events = [event async for event in agent.run("go")]
+                self.assertEqual(self.executed, [])
+                self.assertEqual(agent.messages[1].stop_reason, reason)
+                self.assertTrue(agent.messages[2].is_error)
+                self.assertEqual(events[-1].data["status"], status)
+                self.assertEqual(
+                    next(event for event in events if event.type == "turn_end").data["stop_reason"],
+                    reason,
+                )
 
     async def test_multiple_tool_results_are_paired_before_next_model_turn(self):
         second = ToolCall("c2", "echo", {"text": "bye"})

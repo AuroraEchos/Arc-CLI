@@ -206,6 +206,7 @@ class Arc:
             raise ValueError("Prompt cannot be empty")
         self.is_running = True
         partial: list[str] = []
+        reasoning_partial: list[str] = []
         streaming = False
         pending: tuple[ToolCall, ...] = ()
         batch_start = len(self.messages)
@@ -224,6 +225,7 @@ class Arc:
                 context = project_context(context)
                 context = [*deepcopy(self.context_prefix), *context]
                 partial = []
+                reasoning_partial = []
                 calls: list[ToolCall] = []
                 streaming = True
                 yield Event("message_start", {"role": "assistant"})
@@ -241,13 +243,24 @@ class Arc:
                         if event.kind == "text_delta":
                             partial.append(event.text)
                             yield Event("message_update", {"delta": event.text})
+                        elif event.kind == "reasoning_delta":
+                            # Preserve DeepSeek reasoning for required tool-call round trips,
+                            # but keep the interactive transcript focused on the final answer.
+                            reasoning_partial.append(event.text)
                         elif event.kind == "tool_call" and event.tool_call:
                             calls.append(event.tool_call)
                         elif event.kind == "done":
                             terminal = event
                 if terminal is None:
                     raise ValueError("Provider stream ended without done")
-                if terminal.stop_reason not in ("stop", "tool_use", "length"):
+                if terminal.stop_reason not in (
+                    "stop",
+                    "tool_use",
+                    "length",
+                    "content_filter",
+                    "insufficient_system_resource",
+                    "aborted",
+                ):
                     raise ValueError("Provider did not complete successfully")
                 if len({call.id for call in calls}) != len(calls):
                     raise ValueError("Duplicate tool call IDs")
@@ -261,13 +274,14 @@ class Arc:
                     tuple(calls),
                     stop_reason=terminal.stop_reason,
                     usage=terminal.usage,
+                    reasoning_content="".join(reasoning_partial),
                 )
                 streaming = False
                 pending = message.tool_calls
                 batch_start = len(self.messages)
                 yield self._append(message)
                 for call in pending:
-                    if terminal.stop_reason == "length":
+                    if terminal.stop_reason != "tool_use":
                         yield Event(
                             "tool_execution_start",
                             {"tool_call": asdict(call), "effects": [], "status": "not_executed"},
@@ -278,10 +292,13 @@ class Arc:
                                 "call_id": call.id,
                                 "status": "blocked",
                                 "effects": [],
-                                "reason": "model output was truncated",
+                                "reason": f"model stopped with {terminal.stop_reason}",
                             },
                         )
-                        result = "Not executed: model output was truncated. Reissue complete arguments."
+                        result = (
+                            f"Not executed: model stopped with {terminal.stop_reason}. "
+                            "Inspect the response and reissue complete arguments if appropriate."
+                        )
                         ended = self._append(
                             Message("tool", result, tool_call_id=call.id, name=call.name, is_error=True)
                         )
@@ -303,6 +320,18 @@ class Arc:
                 pending = ()
                 yield Event("turn_end", {"turn": turn, "stop_reason": terminal.stop_reason})
                 active_turn = None
+                terminal_errors = {
+                    "content_filter": "Model output was blocked by content filtering",
+                    "insufficient_system_resource": (
+                        "Model generation stopped due to insufficient system resources"
+                    ),
+                    "aborted": "Model generation was aborted by the provider",
+                }
+                if terminal.stop_reason in terminal_errors:
+                    yield Event("error", {"message": terminal_errors[terminal.stop_reason]})
+                    status = "aborted" if terminal.stop_reason == "aborted" else "error"
+                    yield Event("agent_end", {"status": status})
+                    return
                 if terminal.stop_reason == "length" and not calls:
                     yield Event("error", {"message": "Model output reached its token limit"})
                     yield Event("agent_end", {"status": "error"})
@@ -319,7 +348,14 @@ class Arc:
         except Exception as exc:
             if streaming:
                 streaming = False
-                yield self._append(Message("assistant", "".join(partial), stop_reason="error"))
+                yield self._append(
+                    Message(
+                        "assistant",
+                        "".join(partial),
+                        stop_reason="error",
+                        reasoning_content="".join(reasoning_partial),
+                    )
+                )
             if active_turn is not None:
                 yield Event("turn_end", {"turn": active_turn, "stop_reason": "error"})
                 active_turn = None
@@ -327,7 +363,14 @@ class Arc:
             yield Event("agent_end", {"status": "error"})
         finally:
             if streaming:
-                self.messages.append(Message("assistant", "".join(partial), stop_reason="aborted"))
+                self.messages.append(
+                    Message(
+                        "assistant",
+                        "".join(partial),
+                        stop_reason="aborted",
+                        reasoning_content="".join(reasoning_partial),
+                    )
+                )
             # 取消发生在工具调用中间时，必须补齐未完成工具的结果；恢复绝不重放副作用。
             completed = {m.tool_call_id for m in self.messages[batch_start:] if m.role == "tool"}
             for call in pending:

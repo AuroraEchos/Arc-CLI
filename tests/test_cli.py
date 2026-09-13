@@ -37,12 +37,25 @@ class CliTests(unittest.TestCase):
 
     def test_help_and_version(self):
         self.assertEqual(self.cli("--help").returncode, 0)
-        self.assertIn("0.1.1", self.cli("--version").stdout)
+        self.assertIn("0.1.2", self.cli("--version").stdout)
         self.assertIn("--no-color", self.cli("--help").stdout)
         self.assertIn("--no-markdown", self.cli("--help").stdout)
         self.assertIn("--policy {autonomous,restricted}", self.cli("--help").stdout)
         self.assertIn("--instructions", self.cli("--help").stdout)
+        self.assertIn("--thinking {enabled,disabled}", self.cli("--help").stdout)
+        self.assertIn("--reasoning-effort", self.cli("--help").stdout)
+        self.assertIn("--max-tokens", self.cli("--help").stdout)
         self.assertNotIn("--allow-external", self.cli("--help").stdout)
+
+    def test_deepseek_options_and_legacy_max_tokens_alias(self):
+        args = parser().parse_args(
+            ["--thinking", "enabled", "--reasoning-effort", "max", "--max-tokens", "131072"]
+        )
+        self.assertEqual(args.thinking, "enabled")
+        self.assertEqual(args.reasoning_effort, "max")
+        self.assertEqual(args.max_tokens, 131_072)
+        self.assertEqual(parser().parse_args(["--max-output-tokens", "4096"]).max_tokens, 4096)
+        self.assertIsNone(parser().parse_args([]).max_tokens)
 
     def test_system_remains_an_alias_for_run_instructions(self):
         self.assertEqual(parser().parse_args(["--system", "legacy"]).instructions, "legacy")

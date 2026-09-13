@@ -6,10 +6,35 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import httpx
 
 from arc_cli.types import JsonObject, Message, ProviderEvent, StopReason, ToolCall, ToolSpec, Usage
+
+ThinkingMode = Literal["enabled", "disabled"]
+ReasoningEffort = Literal["none", "low", "high", "max"]
+REASONING_EFFORT_ALIASES: dict[str, ReasoningEffort] = {
+    "none": "none",
+    "minimal": "low",
+    "low": "low",
+    "medium": "high",
+    "high": "high",
+    "xhigh": "high",
+    "max": "max",
+}
+
+
+def normalize_reasoning_effort(value: str | None) -> ReasoningEffort | None:
+    """Normalize DeepSeek/OpenAI-compatible reasoning effort aliases."""
+
+    if value is None:
+        return None
+    try:
+        return REASONING_EFFORT_ALIASES[value]
+    except KeyError:
+        choices = ", ".join(REASONING_EFFORT_ALIASES)
+        raise ValueError(f"reasoning_effort must be one of: {choices}") from None
 
 
 class ProviderError(RuntimeError):
@@ -46,6 +71,8 @@ def wire_messages(messages: Sequence[Message], system_prompt: str) -> list[JsonO
         if message.role not in ("user", "assistant", "tool"):
             raise ValueError("Call project_context before the provider")
         item: JsonObject = {"role": message.role, "content": message.content}
+        if message.role == "assistant" and message.reasoning_content:
+            item["reasoning_content"] = message.reasoning_content
         if message.tool_calls:
             item["tool_calls"] = [
                 {
@@ -76,20 +103,42 @@ class OpenAIProvider:
         api_key: str = "",
         base_url: str = "https://api.openai.com/v1",
         timeout: float = 60,
-        max_output_tokens: int = 4096,
+        thinking: ThinkingMode | None = None,
+        reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
         client: httpx.AsyncClient | None = None,
     ):
-        if not model.strip() or timeout <= 0 or max_output_tokens < 1:
-            raise ValueError("model, timeout and max_output_tokens must be valid")
+        normalized_effort = normalize_reasoning_effort(reasoning_effort)
+        if thinking not in (None, "enabled", "disabled"):
+            raise ValueError("thinking must be enabled or disabled")
+        if max_tokens is not None and not 1 <= max_tokens <= 393_216:
+            raise ValueError("max_tokens must be between 1 and 393216")
+        if normalized_effort == "none" and thinking == "enabled":
+            raise ValueError("reasoning_effort=none conflicts with thinking=enabled")
+        if normalized_effort not in (None, "none") and thinking == "disabled":
+            raise ValueError("reasoning_effort enables thinking and conflicts with thinking=disabled")
+        if not model.strip() or timeout <= 0:
+            raise ValueError("model and timeout must be valid")
         url = httpx.URL(base_url)
         if url.scheme not in ("http", "https") or not url.host or url.username or url.password:
             raise ValueError("base_url must be HTTP(S) without embedded credentials")
         if url.query or url.fragment:
             raise ValueError("base_url must not contain query parameters or a fragment")
         self.model = model
+        if thinking is None:
+            if normalized_effort not in (None, "none"):
+                thinking = "enabled"
+            elif (
+                normalized_effort == "none"
+                or url.host.endswith("deepseek.com")
+                or model.startswith("deepseek-")
+            ):
+                thinking = "disabled"
+        self.thinking: ThinkingMode | None = thinking
+        self.reasoning_effort = normalized_effort
         self._key = api_key
         self._url = base_url.rstrip("/") + "/chat/completions"
-        self._max_tokens = max_output_tokens
+        self._max_tokens = max_tokens
         self._timeout = timeout
         self._owns_client = client is None
         self._client = client if client is not None else httpx.AsyncClient()
@@ -110,8 +159,13 @@ class OpenAIProvider:
             "messages": wire_messages(messages, system_prompt),
             "stream": True,
             "stream_options": {"include_usage": True},
-            "max_completion_tokens": self._max_tokens,
         }
+        if self.thinking is not None:
+            payload["thinking"] = {"type": self.thinking}
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
+        if self._max_tokens is not None:
+            payload["max_tokens"] = self._max_tokens
         if tools:
             payload["tools"] = [
                 {
@@ -166,6 +220,11 @@ class OpenAIProvider:
                         if finish is not None:
                             raise ProviderError("Received a choice after finish_reason")
                         delta = choice.get("delta", {})
+                        reasoning_content = delta.get("reasoning_content")
+                        if reasoning_content:
+                            if not isinstance(reasoning_content, str):
+                                raise ProviderError("Invalid reasoning_content delta")
+                            yield ProviderEvent("reasoning_delta", text=reasoning_content)
                         content = delta.get("content") or delta.get("refusal")
                         if content:
                             if not isinstance(content, str):
@@ -184,7 +243,14 @@ class OpenAIProvider:
                             call["name"] += function.get("name") or ""
                             call["arguments"] += function.get("arguments") or ""
                         finish = choice.get("finish_reason")
-            if not ended or finish not in ("stop", "tool_calls", "length"):
+            if not ended or finish not in (
+                "stop",
+                "tool_calls",
+                "length",
+                "content_filter",
+                "insufficient_system_resource",
+                "aborted",
+            ):
                 raise ProviderError("Incomplete or unsupported model response; no tools executed")
             if (calls and finish == "stop") or (finish == "tool_calls" and not calls):
                 raise ProviderError("Inconsistent finish_reason and tool calls")
@@ -205,10 +271,8 @@ class OpenAIProvider:
             reason: StopReason
             if finish == "tool_calls":
                 reason = "tool_use"
-            elif finish == "length":
-                reason = "length"
             else:
-                reason = "stop"
+                reason = finish
             yield ProviderEvent("done", stop_reason=reason, usage=usage)
         except httpx.HTTPError as exc:
             raise ProviderError(f"Model transport error ({type(exc).__name__}); no automatic retry") from None

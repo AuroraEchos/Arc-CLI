@@ -130,7 +130,25 @@ def parser() -> argparse.ArgumentParser:
         help="remove one additional environment variable from tools",
     )
     result.add_argument("--max-turns", type=int, default=20)
-    result.add_argument("--max-output-tokens", type=int, default=4096)
+    result.add_argument(
+        "--thinking",
+        choices=("enabled", "disabled"),
+        default=None,
+        help="DeepSeek thinking mode; defaults to disabled unless reasoning effort enables it",
+    )
+    result.add_argument(
+        "--reasoning-effort",
+        choices=("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+        help="reasoning strength; aliases: minimal=low, medium/xhigh=high",
+    )
+    result.add_argument(
+        "--max-tokens",
+        "--max-output-tokens",
+        dest="max_tokens",
+        type=int,
+        default=None,
+        help="completion token limit, 1..393216; omitted uses the provider default",
+    )
     result.add_argument("--timeout", type=float, default=60, help="model network timeout in seconds")
     result.add_argument(
         "--instructions",
@@ -221,11 +239,14 @@ async def interactive(session: ArcSession, initial: str, renderer: Renderer) -> 
             while True:
                 try:
                     text = (await prompt_session.prompt_async()).strip()
+                    renderer.finish_input()
                 except KeyboardInterrupt:
+                    renderer.finish_input()
                     await abort()
                     print(renderer.paint("aborted", YELLOW))
                     continue
                 except EOFError:
+                    renderer.finish_input()
                     break
                 if not text:
                     continue
@@ -309,8 +330,10 @@ async def run(args: argparse.Namespace) -> int:
     cwd = (args.cwd or Path.cwd()).resolve()
     if not cwd.is_dir():
         raise ValueError("cwd must be an existing directory")
-    if args.max_turns < 1 or args.max_output_tokens < 1 or args.timeout <= 0:
+    if args.max_turns < 1 or args.timeout <= 0:
         raise ValueError("Limits must be positive")
+    if args.max_tokens is not None and not 1 <= args.max_tokens <= 393_216:
+        raise ValueError("--max-tokens must be between 1 and 393216")
     prompt = " ".join(args.prompt)
     one_shot = args.print_mode or args.mode == "json" or not sys.stdin.isatty()
     if not sys.stdin.isatty():
@@ -346,7 +369,9 @@ async def run(args: argparse.Namespace) -> int:
             api_key=config.secrets.api_key,
             base_url=config.provider.base_url,
             timeout=args.timeout,
-            max_output_tokens=args.max_output_tokens,
+            thinking=args.thinking,
+            reasoning_effort=args.reasoning_effort,
+            max_tokens=args.max_tokens,
         )
         if store is None:
             store = SessionStore.create(cwd, None if args.no_session else (path or new_session_path(cwd)))

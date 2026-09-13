@@ -23,8 +23,8 @@
 
 Arc CLI 是一个终端原生 Agent Runtime，支持可分支会话、显式上下文投影与可校验工具执行。
 
-当前正式发布版本为 **v0.1.1**。本版本增加结构化 `apply_patch` Tool，并继续加固配置、Session 与
-Runtime 边界。
+当前正式发布版本为 **v0.1.2**。本版本增加 DeepSeek 思考模式与强度控制、实时 token usage 状态栏，
+并改进交互输入区的视觉层次。
 
 Arc 是运行在 Arc CLI 中的助手。它根据当前请求判断是否需要工具，按顺序执行模型请求的工具，
 将可验证的工具结果写回历史，并继续推理，直到任务完成、被取消或达到轮次上限。
@@ -61,14 +61,14 @@ Arc 目前发布为 GitHub Release 中的 Python wheel。使用 [uv](https://doc
 `arc` 安装为隔离的全局命令：
 
 ```bash
-uv tool install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.1/arc_cli-0.1.1-py3-none-any.whl"
+uv tool install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.2/arc_cli-0.1.2-py3-none-any.whl"
 arc --version
 ```
 
 也可以使用 pipx：
 
 ```bash
-pipx install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.1/arc_cli-0.1.1-py3-none-any.whl"
+pipx install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.2/arc_cli-0.1.2-py3-none-any.whl"
 arc --version
 ```
 
@@ -185,6 +185,10 @@ Arc CLI 遵循一条 UI 原则：**让用户看见 Agent 的过程，但不要�
 `⠸ bash · pytest -q · 4.8s`。任务完成后只保留单行摘要，例如
 `✓ bash · pytest -q · 84 passed · 6.2s`。
 
+每次模型响应结束后，底部状态栏会显示该轮的输入、输出和总 token 用量；一个任务包含多轮工具调用时，
+还会显示任务累计 token。输入区使用上下分隔线和垂直留白与 transcript 隔开，使用户输入、Agent 输出和
+工具摘要保持清晰的视觉层次。
+
 模型文本使用轻量的 `arc │` 标识。完整行会原子提交到 transcript；尚未换行的 tail 以 50 ms
 节流显示在 prompt_toolkit 管理的状态栏中，消息结束时再原子提交，因此不会和输入区重绘竞争。
 非交互模式仍直接逐 fragment 输出。工具原始输出不刷屏，完整结果可通过 `/last-tool` 查看。
@@ -240,9 +244,14 @@ follow-up 会在当前工具循环自然结束后进入上下文。取消或失�
 本机用户。需要 effect gate 时可以使用 `--policy restricted`；此时 external 和 destructive 调用会被
 阻止。restricted 只是 Runtime 授权模式，不是操作系统沙箱。
 
-默认最多执行 20 次模型调用，每次输出上限为 4096 tokens。可以通过
-`--max-turns` 和 `--max-output-tokens` 调整。`--timeout` 控制模型网络超时；
+默认最多执行 20 次模型调用。`--max-tokens` 可将单次 completion 上限设置为 1 到 393216；未设置时
+使用 Provider 默认值。`--max-output-tokens` 保留为兼容别名。`--timeout` 控制模型网络超时；
 `bash` 工具有独立的 timeout 参数，默认 120 秒，最大 600 秒。
+
+DeepSeek Chat Completions 默认以 `thinking.type=disabled` 运行。使用 `--thinking enabled` 可开启思考，
+也可以通过 `--reasoning-effort low|high|max` 同时开启并选择强度。`none` 关闭思考；兼容值
+`minimal` 映射为 `low`，`medium` 和 `xhigh` 映射为 `high`。互相矛盾的 thinking/effort 组合会在
+发送请求前报错。
 
 退出码：
 
@@ -370,7 +379,10 @@ JSONL Runtime Event Protocol 当前版本为 `1`，每条事件都包含 `protoc
 ## Provider 支持
 
 当前实现支持 OpenAI Chat Completions 兼容协议，包括流式文本、function calling、
-`stream_options.include_usage` 和 `max_completion_tokens`。目前不支持 Responses、
+DeepSeek `reasoning_content`、`thinking`、`reasoning_effort`、`stream_options.include_usage` 和
+`max_tokens`。思考内容会随 assistant 消息持久化，并在包含工具的后续请求中回传，但不会混入普通
+终端回答。`content_filter`、`insufficient_system_resource` 与 `aborted` 等停止原因会完整进入 Runtime
+生命周期并以失败状态结束任务。目前不支持 Responses、
 Anthropic 原生协议、图像、音频、推理签名或 OAuth。不兼容字段应在 Provider 层适配。
 
 ## 来源与许可

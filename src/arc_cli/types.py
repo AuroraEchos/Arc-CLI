@@ -10,7 +10,15 @@ JsonValue: TypeAlias = "None | bool | int | float | str | list[JsonValue] | dict
 JsonObject: TypeAlias = dict[str, Any]
 
 Role = Literal["user", "assistant", "tool", "summary", "note"]
-StopReason = Literal["stop", "tool_use", "length", "error", "aborted"]
+StopReason = Literal[
+    "stop",
+    "tool_use",
+    "length",
+    "content_filter",
+    "insufficient_system_resource",
+    "error",
+    "aborted",
+]
 Effect = Literal["read", "write", "process", "external", "destructive"]
 
 EVENT_PROTOCOL_VERSION = 1
@@ -68,6 +76,7 @@ class Message:
     stop_reason: StopReason | None = None
     usage: Usage | None = None
     is_error: bool = False
+    reasoning_content: str = ""
 
     def to_dict(self) -> JsonObject:
         """将消息及其嵌套数据转换为可序列化字典。"""
@@ -93,13 +102,25 @@ class Message:
                 raise ValueError("Invalid tool arguments")
             calls.append(ToolCall(raw["id"], raw["name"], raw["arguments"]))
         reason = data.get("stop_reason")
-        if reason not in (None, "stop", "tool_use", "length", "error", "aborted"):
+        if reason not in (
+            None,
+            "stop",
+            "tool_use",
+            "length",
+            "content_filter",
+            "insufficient_system_resource",
+            "error",
+            "aborted",
+        ):
             raise ValueError("Invalid stop reason")
         for key in ("tool_call_id", "name"):
             if data.get(key) is not None and not isinstance(data[key], str):
                 raise ValueError(f"Invalid {key}")
         if type(data.get("is_error", False)) is not bool:
             raise ValueError("Invalid is_error")
+        reasoning_content = data.get("reasoning_content", "")
+        if not isinstance(reasoning_content, str):
+            raise ValueError("Invalid reasoning_content")
         usage = data.get("usage")
         if usage is not None:
             if not isinstance(usage, dict) or any(
@@ -117,6 +138,7 @@ class Message:
             reason,
             usage,
             data.get("is_error", False),
+            reasoning_content,
         )
 
 
@@ -124,7 +146,7 @@ class Message:
 class ProviderEvent:
     """表示 Provider 向 Arc 发送的流式响应事件。"""
 
-    kind: Literal["text_delta", "tool_call", "done"]
+    kind: Literal["text_delta", "reasoning_delta", "tool_call", "done"]
     text: str = ""
     tool_call: ToolCall | None = None
     stop_reason: StopReason | None = None

@@ -17,7 +17,7 @@ from typing import TextIO
 
 from arc_cli import __version__
 from arc_cli.runtime import ArcSession
-from arc_cli.types import Event, JsonObject, Message
+from arc_cli.types import Event, JsonObject, Message, Usage
 
 RESET = "\x1b[0m"
 CYAN = "\x1b[36m"
@@ -234,6 +234,9 @@ class Renderer:
         self._spinner_frame = 0
         self._activity_started: float | None = None
         self._invalidate: Callable[[], None] | None = None
+        self.last_usage: Usage | None = None
+        self.task_input_tokens = 0
+        self.task_output_tokens = 0
 
     def bind_prompt(self, invalidate: Callable[[], None]) -> None:
         """将活动状态绑定到 prompt_toolkit 的重绘机制。"""
@@ -249,25 +252,57 @@ class Renderer:
     def bottom_toolbar(self) -> str:
         """返回 prompt_toolkit 底部活动状态栏的格式化内容。"""
 
-        if self._spinner_label is None:
-            return ""
         columns = max(20, shutil.get_terminal_size((88, 24)).columns)
+        usage = self._usage_label()
+        if self._spinner_label is None:
+            return _clip_cells(usage, columns)
         frame = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
         elapsed = monotonic() - self._activity_started if self._activity_started is not None else 0
         label = _clip_cells(self._spinner_label, max(8, min(54, columns - 14)))
         status = f"{frame} {label} · {elapsed:.1f}s"
-        if not self._message_buffer:
+        if self._message_buffer:
+            width = columns - _display_width(status) - 3
+            if width < 8:
+                return _clip_cells(status, columns)
+            preview = _clip_cells(" ".join(self._message_buffer.split()), width, tail=True)
+            return f"{status} │ {preview}"
+        if not usage:
             return _clip_cells(status, columns)
-        width = columns - _display_width(status) - 3
-        if width < 8:
+        available = columns - _display_width(status) - 3
+        if available < 12:
             return _clip_cells(status, columns)
-        preview = _clip_cells(" ".join(self._message_buffer.split()), width, tail=True)
-        return f"{status} │ {preview}"
+        return f"{status} │ {_clip_cells(usage, available)}"
+
+    def _usage_label(self) -> str:
+        """Return the latest request usage plus the running task total."""
+
+        if self.last_usage is None:
+            return ""
+        latest_total = self.last_usage.input_tokens + self.last_usage.output_tokens
+        task_total = self.task_input_tokens + self.task_output_tokens
+        label = (
+            f"tokens · {self.last_usage.input_tokens:,} in · "
+            f"{self.last_usage.output_tokens:,} out · {latest_total:,} total"
+        )
+        if task_total != latest_total:
+            label += f" · task {task_total:,}"
+        return label
 
     def input_prompt(self) -> str:
         """仅在当前任务真正结束后显示下一条输入提示。"""
 
-        return "› " if self.state == "idle" else "↳ "
+        marker = "›" if self.state == "idle" else "↳"
+        return f"\n{self._input_rule()}\n\n{marker} "
+
+    def finish_input(self) -> None:
+        """Close the framed input area with vertical breathing room."""
+
+        print(f"\n{self.paint(self._input_rule(), DIM)}\n", file=self.stdout, flush=True)
+
+    @staticmethod
+    def _input_rule() -> str:
+        columns = shutil.get_terminal_size((88, 24)).columns
+        return "─" * max(12, min(72, columns - 2))
 
     def paint(self, text: str, style: str) -> str:
         """在启用颜色时为文本应用单个 ANSI 样式。"""
@@ -339,6 +374,9 @@ class Renderer:
             return
         if event.type == "agent_start":
             self.state = "running"
+            self.last_usage = None
+            self.task_input_tokens = 0
+            self.task_output_tokens = 0
         elif event.type == "turn_start":
             self.turn = int(event.data["turn"])
             self.pending_tool = None
@@ -360,6 +398,15 @@ class Renderer:
                 self._flush_complete_message_lines()
                 self._schedule_message_preview()
         elif event.type == "message_end" and event.data["message"]["role"] == "assistant":
+            raw_usage = event.data["message"].get("usage")
+            if isinstance(raw_usage, dict):
+                usage = Usage(
+                    int(raw_usage.get("input_tokens", 0)),
+                    int(raw_usage.get("output_tokens", 0)),
+                )
+                self.last_usage = usage
+                self.task_input_tokens += usage.input_tokens
+                self.task_output_tokens += usage.output_tokens
             self._flush_message_tail()
             self.stop_activity()
         elif event.type == "tool_execution_start":
@@ -568,6 +615,13 @@ class Renderer:
         self._metadata("tools", " ".join(session.agent.tools.names()) or "(none)")
         self._metadata("policy", session.agent.policy.mode)
         self._metadata("effects", " ".join(sorted(session.agent.policy.allowed)) or "(none)")
+        thinking = getattr(session.agent.provider, "thinking", None)
+        effort = getattr(session.agent.provider, "reasoning_effort", None)
+        if thinking is not None:
+            self._metadata("thinking", str(thinking))
+            self._metadata("effort", str(effort or "default"))
+        if self.last_usage is not None:
+            self._metadata("usage", self._usage_label().removeprefix("tokens · "))
         self._metadata("state", "running" if busy else self.state)
         if busy and self.turn is not None:
             self._metadata("turn", f"{self.turn} / {session.agent.max_turns}")

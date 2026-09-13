@@ -60,7 +60,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         renderer.show_status(session, busy=False)
 
         text = output.getvalue()
-        self.assertIn("ARC 0.1.1 · scripted", text)
+        self.assertIn("ARC 0.1.2 · scripted", text)
         self.assertIn("› task   ↳ steer", text)
         self.assertIn("model    scripted", text)
         self.assertIn("tools    read write edit apply_patch bash", text)
@@ -78,12 +78,55 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.getvalue(), "arc │ first\n    │ second\n")
 
     def test_input_prompt_distinguishes_idle_and_steering(self) -> None:
-        renderer = Renderer("text", stdout=io.StringIO(), stderr=io.StringIO())
-        self.assertEqual(renderer.input_prompt(), "› ")
+        output = io.StringIO()
+        renderer = Renderer("text", stdout=output, stderr=io.StringIO())
+        idle = renderer.input_prompt()
+        self.assertTrue(idle.endswith("\n\n› "))
+        self.assertIn("────────────", idle)
         renderer.emit(Event("agent_start"))
-        self.assertEqual(renderer.input_prompt(), "↳ ")
+        self.assertTrue(renderer.input_prompt().endswith("\n\n↳ "))
         renderer.emit(Event("agent_end", {"status": "complete"}))
-        self.assertEqual(renderer.input_prompt(), "› ")
+        self.assertTrue(renderer.input_prompt().endswith("\n\n› "))
+        renderer.finish_input()
+        self.assertIn("\n────────────────", output.getvalue())
+
+    def test_usage_stays_in_bottom_toolbar_and_accumulates_per_task(self) -> None:
+        output = io.StringIO()
+        renderer = Renderer("text", stdout=output, stderr=output)
+        renderer.emit(Event("agent_start", {"status": "running"}))
+        renderer.emit(Event("message_start", {"role": "assistant"}))
+        renderer.emit(
+            Event(
+                "message_end",
+                {
+                    "message": {
+                        "role": "assistant",
+                        "usage": {"input_tokens": 1_200, "output_tokens": 300},
+                    }
+                },
+            )
+        )
+        self.assertEqual(renderer.bottom_toolbar(), "tokens · 1,200 in · 300 out · 1,500 total")
+
+        renderer.emit(Event("turn_start", {"turn": 2}))
+        renderer.emit(Event("message_start", {"role": "assistant"}))
+        renderer.emit(Event("message_update", {"delta": "new response preview"}))
+        self.assertIn("new response preview", renderer.bottom_toolbar())
+        renderer.emit(
+            Event(
+                "message_end",
+                {
+                    "message": {
+                        "role": "assistant",
+                        "usage": {"input_tokens": 2_000, "output_tokens": 500},
+                    }
+                },
+            )
+        )
+        self.assertEqual(
+            renderer.bottom_toolbar(),
+            "tokens · 2,000 in · 500 out · 2,500 total · task 4,000",
+        )
 
     def test_fragmented_multiline_message_is_written_as_complete_lines(self) -> None:
         output = io.StringIO()

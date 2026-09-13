@@ -1,7 +1,7 @@
 # Arc 架构设计报告
 
 > 文档状态：当前架构基线
-> 对应版本：Arc CLI 0.1.1
+> 对应版本：Arc CLI 0.1.2
 > 更新日期：2026-09-12
 > 目标读者：Arc 维护者、Profile/Tool/Provider 开发者、终端与 Runtime 集成方
 
@@ -450,8 +450,9 @@ process ARC_API_KEY > empty
 - `summary`：压缩后的历史摘要；
 - `note`：仅本地使用、不会投影给 Provider 的记录。
 
-Message 同时保存 `stop_reason`、usage、tool name、tool_call_id 和错误标记。Provider、Session 和
-ContextBuilder 都围绕同一结构工作，从而避免每层维护一套不一致的消息模型。
+Message 同时保存 `stop_reason`、usage、DeepSeek `reasoning_content`、tool name、tool_call_id 和错误
+标记。Provider、Session 和 ContextBuilder 都围绕同一结构工作，从而避免每层维护一套不一致的消息
+模型。思考内容不会作为普通终端文本渲染，但会在包含工具的后续 Chat Completions 请求中回传。
 
 ### 10.2 Event 是观察协议
 
@@ -635,8 +636,8 @@ Runtime 只要求 Provider 暴露：
 - `stream(messages, system_prompt, tools)` 异步事件流；
 - `aclose()` 生命周期方法。
 
-统一 ProviderEvent 只有三类：`text_delta`、`tool_call` 和 `done`。这使 Agent 不需要了解 SSE、HTTP、
-Chat Completions 字段或兼容服务的细节。
+统一 ProviderEvent 包括 `text_delta`、`reasoning_delta`、`tool_call` 和 `done`。这使 Agent 不需要了解
+SSE、HTTP、Chat Completions 字段或兼容服务的细节。
 
 ### 14.2 当前 OpenAI-compatible 实现
 
@@ -649,6 +650,9 @@ Chat Completions 字段或兼容服务的细节。
 - interleaved tool fragments 按 index 重组；
 - arguments 必须是严格 JSON object，拒绝 NaN/Infinity；
 - duplicate Tool ID、malformed arguments 和 incomplete stream 都不会执行工具；
+- DeepSeek `thinking` 默认显式关闭，reasoning effort aliases 在 Provider 边界归一化；
+- 使用 DeepSeek `max_tokens`，未配置时不发送并保留服务端按思考模式选择默认值的能力；
+- 完整保留 `content_filter`、`insufficient_system_resource` 和 `aborted` 等终止原因；
 - HTTP 错误不回显服务端原始 body 或请求 URL，降低泄漏风险；
 - 传输或协议失败当前不自动重试。
 

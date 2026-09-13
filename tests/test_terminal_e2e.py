@@ -24,7 +24,12 @@ def text_response(text: str) -> list[bytes]:
 
     return [
         _data({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}),
-        _data({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        _data(
+            {
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 42, "completion_tokens": 7, "total_tokens": 49},
+            }
+        ),
         b"data: [DONE]\n\n",
     ]
 
@@ -38,7 +43,12 @@ def fragmented_text_response(fragments: list[str]) -> list[bytes]:
     ]
     packets.extend(
         [
-            _data({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+            _data(
+                {
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 42, "completion_tokens": 7, "total_tokens": 49},
+                }
+            ),
             b"data: [DONE]\n\n",
         ]
     )
@@ -56,7 +66,12 @@ def tool_response(name: str, arguments: dict[str, object]) -> list[bytes]:
     }
     return [
         _data({"choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None}]}),
-        _data({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        _data(
+            {
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49},
+            }
+        ),
         b"data: [DONE]\n\n",
     ]
 
@@ -125,7 +140,16 @@ class PtyProcess:
         env.pop("NO_COLOR", None)
         self.master = master
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "arc_cli", "--cwd", str(cwd), "--no-session"],
+            [
+                sys.executable,
+                "-m",
+                "arc_cli",
+                "--cwd",
+                str(cwd),
+                "--no-session",
+                "--thinking",
+                "disabled",
+            ],
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -210,19 +234,26 @@ class TerminalE2ETests(unittest.TestCase):
         def action(terminal: PtyProcess) -> None:
             terminal.send("hello\n")
             terminal.wait_for("PTY ready")
-            time.sleep(0.1)
+            terminal.wait_for("tokens")
             terminal.send("/status\n")
+            terminal.wait_for("usage")
             terminal.wait_for("idle")
 
         output, server = self.run_scenario([text_response("PTY ready")], action)
-        self.assertIn("ARC 0.1.1", output)
+        self.assertIn("ARC 0.1.2", output)
         self.assertIn("↳ steer", output)
         self.assertIn("arc-pty-model", output)
         self.assertIn("thinking", output)
         self.assertIn("arc", output)
         self.assertIn("PTY ready", output)
+        self.assertIn("tokens", output)
+        self.assertIn("usage", output)
+        self.assertIn("42 in", output)
+        self.assertIn("────────────", output)
         self.assertIn("state", output)
         self.assertEqual(len(server.requests), 1)
+        self.assertEqual(server.requests[0]["thinking"], {"type": "disabled"})
+        self.assertNotIn("max_completion_tokens", server.requests[0])
 
     def test_real_pty_fragmented_chinese_markdown_preserves_output_and_input(self) -> None:
         fragments = [
@@ -312,7 +343,8 @@ class TerminalE2ETests(unittest.TestCase):
             terminal.wait_for("tool complete")
             time.sleep(0.1)
             terminal.send("/last-tool\n")
-            terminal.wait_for("────────────────────────────────────────────")
+            terminal.wait_for("/last-tool")
+            terminal.wait_for("[Exit code: 0]")
 
         output, server = self.run_scenario(responses, action)
         # prompt_toolkit 使用增量光标更新，状态文本在原始 PTY 字节中可能被控制序列分段。
