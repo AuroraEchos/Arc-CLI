@@ -7,6 +7,6 @@ from arc_cli.agent import Arc
 from arc_cli.policy import ExecutionPolicy
 from arc_cli.profiles import Profile
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = ["Arc", "ExecutionPolicy", "Profile", "__version__"]

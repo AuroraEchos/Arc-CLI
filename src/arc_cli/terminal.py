@@ -531,8 +531,7 @@ class Renderer:
             title_budget = field_budget // 2
             summary_budget = field_budget - title_budget
             suffix = (
-                f" · {_clip_cells(title, title_budget)}"
-                f" · {_clip_cells(summary, summary_budget)} · {elapsed}"
+                f" · {_clip_cells(title, title_budget)} · {_clip_cells(summary, summary_budget)} · {elapsed}"
             )
         else:
             summary_budget = width - _display_width(prefix) - _display_width(elapsed) - 6

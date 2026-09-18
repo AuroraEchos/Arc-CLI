@@ -60,7 +60,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         renderer.show_status(session, busy=False)
 
         text = output.getvalue()
-        self.assertIn("ARC 0.1.2 · scripted", text)
+        self.assertIn("ARC 0.1.3 · scripted", text)
         self.assertIn("› task   ↳ steer", text)
         self.assertIn("model    scripted", text)
         self.assertIn("tools    read write edit apply_patch bash", text)

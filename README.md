@@ -23,8 +23,8 @@
 
 Arc CLI 是一个终端原生 Agent Runtime，支持可分支会话、显式上下文投影与可校验工具执行。
 
-当前正式发布版本为 **v0.1.2**。本版本增加 DeepSeek 思考模式与强度控制、实时 token usage 状态栏，
-并改进交互输入区的视觉层次。
+当前正式发布版本为 **v0.1.3**。本版本进一步简化交互终端 transcript，移除输入边框与重复身份 gutter，
+并改善窄终端下的工具摘要显示。
 
 Arc 是运行在 Arc CLI 中的助手。它根据当前请求判断是否需要工具，按顺序执行模型请求的工具，
 将可验证的工具结果写回历史，并继续推理，直到任务完成、被取消或达到轮次上限。
@@ -61,14 +61,14 @@ Arc 目前发布为 GitHub Release 中的 Python wheel。使用 [uv](https://doc
 `arc` 安装为隔离的全局命令：
 
 ```bash
-uv tool install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.2/arc_cli-0.1.2-py3-none-any.whl"
+uv tool install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.3/arc_cli-0.1.3-py3-none-any.whl"
 arc --version
 ```
 
 也可以使用 pipx：
 
 ```bash
-pipx install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.2/arc_cli-0.1.2-py3-none-any.whl"
+pipx install "https://github.com/AuroraEchos/Arc-CLI/releases/download/v0.1.3/arc_cli-0.1.3-py3-none-any.whl"
 arc --version
 ```
 

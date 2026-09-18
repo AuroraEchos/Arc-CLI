@@ -74,7 +74,7 @@ class InteractiveTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.gather(task, return_exceptions=True)
             self.assertEqual(agent.messages[0].content, "second")
             self.assertEqual(len(session.store.entries), 4)
-            self.assertIn("ARC 0.1.2 · scripted", output.getvalue())
+            self.assertIn("ARC 0.1.3 · scripted", output.getvalue())
             self.assertIn("› task   ↳ steer", output.getvalue())
             self.assertIn("model    scripted", output.getvalue())
             self.assertIn("No tool result in this run.", output.getvalue())

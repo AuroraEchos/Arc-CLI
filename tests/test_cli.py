@@ -37,7 +37,7 @@ class CliTests(unittest.TestCase):
 
     def test_help_and_version(self):
         self.assertEqual(self.cli("--help").returncode, 0)
-        self.assertIn("0.1.2", self.cli("--version").stdout)
+        self.assertIn("0.1.3", self.cli("--version").stdout)
         self.assertIn("--no-color", self.cli("--help").stdout)
         self.assertIn("--no-markdown", self.cli("--help").stdout)
         self.assertIn("--policy {autonomous,restricted}", self.cli("--help").stdout)
