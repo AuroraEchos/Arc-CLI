@@ -69,26 +69,94 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("messages 1", text)
         self.assertIn("state    idle", text)
 
-    def test_assistant_stream_has_lightweight_identity_in_interactive_mode(self) -> None:
+    def test_assistant_stream_is_plain_transcript_in_interactive_mode(self) -> None:
         output = io.StringIO()
         renderer = Renderer("text", stdout=output, stderr=output)
         renderer.emit(Event("message_start", {"role": "assistant"}))
         renderer.emit(Event("message_update", {"delta": "first\nsecond"}))
         renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
-        self.assertEqual(output.getvalue(), "arc │ first\n    │ second\n")
+        self.assertEqual(output.getvalue(), "first\nsecond\n")
+
+    def test_completed_task_leaves_one_blank_line_before_next_input(self) -> None:
+        output = io.StringIO()
+        renderer = Renderer("text", stdout=output, stderr=output)
+        renderer.emit(Event("message_start", {"role": "assistant"}))
+        renderer.emit(Event("message_update", {"delta": "answer"}))
+        renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
+        renderer.emit(Event("agent_end", {"status": "complete"}))
+        self.assertEqual(output.getvalue(), "answer\n\n")
+
+    def test_incomplete_task_does_not_add_completion_spacing(self) -> None:
+        for status in ("error", "aborted", "max_turns"):
+            with self.subTest(status=status):
+                output = io.StringIO()
+                renderer = Renderer("text", stdout=output, stderr=output)
+                renderer.emit(Event("agent_end", {"status": status}))
+                self.assertEqual(output.getvalue(), "")
+
+        output = io.StringIO()
+        renderer = Renderer("text", interactive=False, stdout=output, stderr=output)
+        renderer.emit(Event("agent_end", {"status": "complete"}))
+        self.assertEqual(output.getvalue(), "")
 
     def test_input_prompt_distinguishes_idle_and_steering(self) -> None:
-        output = io.StringIO()
-        renderer = Renderer("text", stdout=output, stderr=io.StringIO())
-        idle = renderer.input_prompt()
-        self.assertTrue(idle.endswith("\n\n› "))
-        self.assertIn("────────────", idle)
+        renderer = Renderer("text", stdout=io.StringIO(), stderr=io.StringIO())
+        self.assertEqual(renderer.input_prompt(), "› ")
         renderer.emit(Event("agent_start"))
-        self.assertTrue(renderer.input_prompt().endswith("\n\n↳ "))
+        self.assertEqual(renderer.input_prompt(), "↳ ")
         renderer.emit(Event("agent_end", {"status": "complete"}))
-        self.assertTrue(renderer.input_prompt().endswith("\n\n› "))
-        renderer.finish_input()
-        self.assertIn("\n────────────────", output.getvalue())
+        self.assertEqual(renderer.input_prompt(), "› ")
+
+    def test_assistant_output_leaves_wrapping_to_terminal_without_gutter(self) -> None:
+        output = TtyBuffer()
+        with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=False):
+            os.environ.pop("NO_COLOR", None)
+            renderer = Renderer("text", stdout=output, stderr=io.StringIO())
+            renderer.emit(Event("message_start", {"role": "assistant"}))
+            renderer.emit(
+                Event(
+                    "message_update",
+                    {"delta": "**中文宽字符内容由终端自动换行**，输出不添加 gutter。"},
+                )
+            )
+            renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
+
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", output.getvalue())
+        self.assertEqual(plain, "中文宽字符内容由终端自动换行，输出不添加 gutter。\n")
+        self.assertNotIn("arc │", plain)
+        self.assertNotIn("    │", plain)
+
+    def test_tool_summary_fits_narrow_terminal(self) -> None:
+        output = io.StringIO()
+        renderer = Renderer("text", stdout=output, stderr=output)
+        with patch("arc_cli.terminal.shutil.get_terminal_size", return_value=os.terminal_size((32, 24))):
+            renderer.emit(
+                Event(
+                    "tool_execution_start",
+                    {
+                        "tool_call": {
+                            "id": "c1",
+                            "name": "bash",
+                            "arguments": {"command": "pytest tests/test_terminal.py -q"},
+                        }
+                    },
+                )
+            )
+            renderer.emit(
+                Event(
+                    "tool_execution_end",
+                    {
+                        "call_id": "c1",
+                        "content": "116 passed in 5.3s\n[Exit code: 0]",
+                        "is_error": False,
+                    },
+                )
+            )
+
+        line = output.getvalue().strip()
+        self.assertIn("✓ bash", line)
+        self.assertIn("0.0s", line)
+        self.assertLessEqual(_display_width(line), 32)
 
     def test_usage_stays_in_bottom_toolbar_and_accumulates_per_task(self) -> None:
         output = io.StringIO()
@@ -138,7 +206,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             output.getvalue(),
-            "arc │ # 上海大学简介\n    │ \n    │ 上海大学是一所高校。\n",
+            "# 上海大学简介\n\n上海大学是一所高校。\n",
         )
 
     def test_one_shot_output_remains_script_friendly(self) -> None:
@@ -182,7 +250,8 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
 
         rendered = output.getvalue()
         plain = re.sub(r"\x1b\[[0-9;]*m", "", rendered)
-        self.assertIn("arc │ 标题", plain)
+        self.assertIn("标题", plain)
+        self.assertNotIn("arc │", plain)
         self.assertIn("粗体、斜体、code、删除和链接 (https://example.com)", plain)
         self.assertIn("☑ 已完成", plain)
         self.assertIn("│ 引用", plain)
@@ -349,7 +418,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("responding", renderer.bottom_toolbar())
         self.assertIn("visible without newline", renderer.bottom_toolbar())
         renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
-        self.assertEqual(output.getvalue(), "arc │ visible without newline\n")
+        self.assertEqual(output.getvalue(), "visible without newline\n")
 
     def test_prompt_preview_keeps_latest_cjk_tail_within_terminal_width(self) -> None:
         renderer = Renderer("text", stdout=io.StringIO(), stderr=io.StringIO())
@@ -368,7 +437,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         for fragment in ("**中", "文** 与 `co", "de`\n下一", "行"):
             renderer.emit(Event("message_update", {"delta": fragment}))
         renderer.emit(Event("message_end", {"message": {"role": "assistant"}}))
-        self.assertEqual(output.getvalue(), "arc │ **中文** 与 `code`\n    │ 下一行\n")
+        self.assertEqual(output.getvalue(), "**中文** 与 `code`\n下一行\n")
         self.assertTrue(output.writes)
         self.assertTrue(all(write.endswith("\n") for write in output.writes))
 

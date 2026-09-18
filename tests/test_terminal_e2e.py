@@ -244,12 +244,11 @@ class TerminalE2ETests(unittest.TestCase):
         self.assertIn("↳ steer", output)
         self.assertIn("arc-pty-model", output)
         self.assertIn("thinking", output)
-        self.assertIn("arc", output)
         self.assertIn("PTY ready", output)
+        self.assertNotIn("arc │", output)
         self.assertIn("tokens", output)
         self.assertIn("usage", output)
         self.assertIn("42 in", output)
-        self.assertIn("────────────", output)
         self.assertIn("state", output)
         self.assertEqual(len(server.requests), 1)
         self.assertEqual(server.requests[0]["thinking"], {"type": "disabled"})
@@ -317,7 +316,7 @@ class TerminalE2ETests(unittest.TestCase):
             terminal.wait_for("thinking")
             terminal.send("/sta")
             terminal.wait_for("终端命令也不会丢失。")
-            terminal.wait_for("\x1b[36marc\x1b[0m │")
+            terminal.wait_for("tokens · 42 in")
             terminal.send("tus\n")
             terminal.wait_for("idle")
 
@@ -394,7 +393,6 @@ class TerminalE2ETests(unittest.TestCase):
         self.assertIn("state", output)
         self.assertIn("idle", output)
         self.assertNotIn("✓ bash", output)
-        self.assertNotIn("arc │ slow-finished", output)
         self.assertEqual(len(server.requests), 1)
 
 

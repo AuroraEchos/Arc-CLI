@@ -292,17 +292,7 @@ class Renderer:
         """仅在当前任务真正结束后显示下一条输入提示。"""
 
         marker = "›" if self.state == "idle" else "↳"
-        return f"\n{self._input_rule()}\n\n{marker} "
-
-    def finish_input(self) -> None:
-        """Close the framed input area with vertical breathing room."""
-
-        print(f"\n{self.paint(self._input_rule(), DIM)}\n", file=self.stdout, flush=True)
-
-    @staticmethod
-    def _input_rule() -> str:
-        columns = shutil.get_terminal_size((88, 24)).columns
-        return "─" * max(12, min(72, columns - 2))
+        return f"{marker} "
 
     def paint(self, text: str, style: str) -> str:
         """在启用颜色时为文本应用单个 ANSI 样式。"""
@@ -448,6 +438,8 @@ class Renderer:
             self.stop_activity()
             self.state = "idle"
             self.pending_tool = None
+            if self.interactive and event.data.get("status") == "complete":
+                print(file=self.stdout, flush=True)
 
     def _flush_complete_message_lines(self) -> None:
         """Atomically submit complete lines while retaining a partial tail."""
@@ -511,20 +503,17 @@ class Renderer:
     def _write_message_lines(self, lines: list[str]) -> None:
         """Write complete interactive lines in one StdoutProxy transaction."""
 
-        rendered = []
-        for line in lines:
-            prefix = self.paint("arc", CYAN) + " │ " if not self.assistant_started else "    │ "
-            rendered.append(prefix + self.markdown.render_line(line))
-            self.assistant_started = True
+        rendered = [self.markdown.render_line(line) for line in lines]
+        self.assistant_started = True
         self.stdout.write("\n".join(rendered) + "\n")
         self.stdout.flush()
 
     def _tool_line(self, snapshot: ToolSnapshot) -> str:
         """Render one quiet, durable completion summary."""
 
-        width = max(48, min(100, shutil.get_terminal_size((88, 24)).columns))
-        title = self._tool_title(snapshot, max(12, width // 2))
-        detail = self._tool_detail(snapshot, max(12, width // 2))
+        width = max(20, min(100, shutil.get_terminal_size((88, 24)).columns))
+        title = self._tool_title(snapshot, width)
+        detail = self._tool_detail(snapshot, width)
         summary = detail[-1] if detail else ("error" if snapshot.is_error else "done")
         elapsed = f"{snapshot.duration_ms / 1000:.1f}s"
         if snapshot.status == "blocked":
@@ -533,7 +522,25 @@ class Renderer:
             symbol, style = "✗", RED
         else:
             symbol, style = "✓", GREEN
-        return self.paint(f"{symbol} {snapshot.name}", style) + f" · {title} · {summary} · {elapsed}"
+        prefix = f"{symbol} {snapshot.name}"
+        full_suffix = f" · {title} · {summary} · {elapsed}"
+        if _display_width(prefix + full_suffix) <= width:
+            return self.paint(prefix, style) + full_suffix
+        field_budget = width - _display_width(prefix) - _display_width(elapsed) - 9
+        if field_budget >= 12:
+            title_budget = field_budget // 2
+            summary_budget = field_budget - title_budget
+            suffix = (
+                f" · {_clip_cells(title, title_budget)}"
+                f" · {_clip_cells(summary, summary_budget)} · {elapsed}"
+            )
+        else:
+            summary_budget = width - _display_width(prefix) - _display_width(elapsed) - 6
+            if summary_budget >= 2:
+                suffix = f" · {_clip_cells(summary, summary_budget)} · {elapsed}"
+            else:
+                suffix = f" · {elapsed}"
+        return self.paint(prefix, style) + suffix
 
     @staticmethod
     def _tool_title(snapshot: ToolSnapshot, width: int) -> str:

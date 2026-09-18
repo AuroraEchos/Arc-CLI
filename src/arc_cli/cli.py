@@ -239,14 +239,11 @@ async def interactive(session: ArcSession, initial: str, renderer: Renderer) -> 
             while True:
                 try:
                     text = (await prompt_session.prompt_async()).strip()
-                    renderer.finish_input()
                 except KeyboardInterrupt:
-                    renderer.finish_input()
                     await abort()
                     print(renderer.paint("aborted", YELLOW))
                     continue
                 except EOFError:
-                    renderer.finish_input()
                     break
                 if not text:
                     continue

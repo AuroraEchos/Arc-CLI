@@ -666,7 +666,7 @@ SSE、HTTP、Chat Completions 字段或兼容服务的细节。
 ### 15.1 Terminal-native，而不是全屏 TUI
 
 Arc 保留普通 terminal transcript：用户可以滚动、选择、复制、使用 shell 历史，并在非交互模式下
-通过管道组合。视觉语言集中在少量元素：`ARC`、`›`、`↳`、`arc │`、spinner 和成功/错误语义色。
+通过管道组合。视觉语言集中在少量元素：`ARC`、`›`、`↳`、spinner 和成功/错误语义色。
 
 ### 15.2 Idle 与 Steering
 
